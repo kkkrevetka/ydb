@@ -37,7 +37,7 @@ Y_UNIT_TEST_SUITE(SqlParsingOnly) {
         return failed;
     }
 
-    Y_UNIT_TEST(TokensAsColumnName) {
+    Y_UNIT_TEST(TokensAsColumnName) { //id_expr
         auto failed = ValidateTokens({
                 "ALL", "ANY", "AS", "ASSUME", "AUTOMAP", "BETWEEN", "BITCAST",
                 "CALLABLE", "CASE", "CAST", "CUBE", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
@@ -51,6 +51,40 @@ Y_UNIT_TEST_SUITE(SqlParsingOnly) {
                 TStringBuilder req;
                 req << "SELECT " << token << " FROM Plato.Input";
                 return req;
+            }
+        );
+        UNIT_ASSERT_VALUES_EQUAL(failed, TVector<TString>{});
+    }
+
+    Y_UNIT_TEST(TokensAsWithoutColumnName) { //id_without
+        auto failed = ValidateTokens({
+                "ALL", "AS", "ASSUME", "AUTOMAP", "BETWEEN", "BITCAST",
+                "CALLABLE", "CASE", "CAST", "CUBE", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
+                "DICT", "DISTINCT", "EMPTY_ACTION", "ENUM", "EXCEPT", "EXISTS", "FALSE", "FLOW", "FROM", "FULL", "GLOBAL",
+                "HAVING", "HOP", "INTERSECT", "JSON_EXISTS", "JSON_QUERY", "JSON_VALUE", "LIMIT", "LIST", "LOCAL",
+                "NOT", "NULL", "OPTIONAL", "PROCESS", "REDUCE", "REPEATABLE", "RESOURCE", "RETURN", "ROLLUP",
+                "SELECT", "SET", "STRUCT", "TAGGED", "TRUE", "TUPLE", "UNBOUNDED", "UNION", "VARIANT",
+                "WHEN", "WHERE", "WINDOW", "WITHOUT"
+             },
+             [](const TString& token){
+                 TStringBuilder req;
+                 req << "SELECT * WITHOUT " << token << " FROM Plato.Input";
+                 return req;
+             }
+        );
+        UNIT_ASSERT_VALUES_EQUAL(failed, TVector<TString>{});
+    }
+
+    Y_UNIT_TEST(TokensAsColumnNameInAddColumn) { //id_schema
+        auto failed = ValidateTokens({
+                "ANY", "AUTOMAP", "CALLABLE", "COLUMN", "DICT", "ENUM", "ERASE", "FALSE", "FLOW",
+                "GLOBAL", "LIST", "OPTIONAL", "REPEATABLE", "RESOURCE",
+                "SET", "STREAM", "STRUCT", "TAGGED", "TRUE", "TUPLE", "VARIANT"
+            },
+            [](const TString& token){
+                 TStringBuilder req;
+                 req << "ALTER TABLE Plato.Input ADD COLUMN " << token << " Bool";
+                 return req;
             }
         );
         UNIT_ASSERT_VALUES_EQUAL(failed, TVector<TString>{});
@@ -70,23 +104,79 @@ Y_UNIT_TEST_SUITE(SqlParsingOnly) {
         UNIT_ASSERT_VALUES_EQUAL(failed, TVector<TString>{});
     }
 
-    Y_UNIT_TEST(TokensAsTableName) {
+    Y_UNIT_TEST(TokensAsTableName) { //id_table_or_type
         auto failed = ValidateTokens({
-            "ANY", "AUTOMAP", "COLUMN", "ERASE", "FALSE",
-            "GLOBAL", "REPEATABLE", "STREAM", "TRUE"
+                "ANY", "AUTOMAP", "COLUMN", "ERASE", "FALSE",
+                "GLOBAL", "REPEATABLE", "STREAM", "TRUE"
             },
-            [](const TString& token){ return TString("SELECT * FROM Plato.") + token ;}
+            [](const TString& token){
+                TStringBuilder req;
+                req << "SELECT * FROM Plato." << token;
+                return req;
+            }
         );
         UNIT_ASSERT_VALUES_EQUAL(failed, TVector<TString>{});
     }
 
-    Y_UNIT_TEST(TokensAsTableAlias) {
+    Y_UNIT_TEST(TokensAsTableAlias) { //id_table
         auto failed = ValidateTokens({
-            "AUTOMAP", "CALLABLE", "DICT", "ENUM","FALSE", "FLOW",
-            "GLOBAL", "LIST", "OPTIONAL", "REPEATABLE", "RESOURCE",
-            "SET", "STRUCT", "TAGGED", "TRUE", "TUPLE", "VARIANT"
+                "AUTOMAP", "CALLABLE", "DICT", "ENUM","FALSE", "FLOW",
+                "GLOBAL", "LIST", "OPTIONAL", "REPEATABLE", "RESOURCE",
+                "SET", "STRUCT", "TAGGED", "TRUE", "TUPLE", "VARIANT"
             },
-            [](const TString& token){ return TString("SELECT * FROM Plato.Input as ") + token ;}
+            [](const TString& token){
+                 TStringBuilder req;
+                 req << "SELECT * FROM Plato.Input AS " << token;
+                 return req;
+            }
+        );
+        UNIT_ASSERT_VALUES_EQUAL(failed, TVector<TString>{});
+    }
+
+    Y_UNIT_TEST(TokensAsHints) { //id_hint
+        auto failed = ValidateTokens({
+                "AUTOMAP", "CALLABLE", "COLUMNS", "DICT", "ENUM", "FALSE", "FLOW",
+                "GLOBAL", "LIST", "OPTIONAL", "REPEATABLE", "RESOURCE",
+                "SCHEMA", "SET", "STRUCT", "TAGGED", "TRUE", "TUPLE", "VARIANT"
+            },
+            [](const TString& token){
+                TStringBuilder req;
+                req << "SELECT * FROM Plato.Input WITH " << token;
+                return req;
+            }
+        );
+        UNIT_ASSERT_VALUES_EQUAL(failed, TVector<TString>{});
+    }
+
+    Y_UNIT_TEST(TokensAsWindow) { //id_window
+        auto failed = ValidateTokens({
+                "AUTOMAP", "CALLABLE", "DICT", "ENUM", "FALSE", "FLOW", "GLOBAL", "GROUPS", "LIST", "OPTIONAL",
+                "RANGE", "REPEATABLE", "RESOURCE", "ROWS", "SET", "STRUCT", "TAGGED" ,"TRUE", "TUPLE", "VARIANT"
+            },
+            [](const TString& token){
+                TStringBuilder req;
+                req << "SELECT * FROM Plato.Input WINDOW " << token << " AS ()";
+                return req;
+            }
+        );
+        UNIT_ASSERT_VALUES_EQUAL(failed, TVector<TString>{});
+    }
+
+    Y_UNIT_TEST(TokensAsIdExprIn) { //id_expr_in
+        auto failed = ValidateTokens({
+                "ALL", "ANY", "AS", "ASSUME", "AUTOMAP", "BETWEEN", "BITCAST",
+                "CALLABLE", "CASE", "CAST", "COMPACT", "CUBE", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
+                "DICT", "DISTINCT", "ENUM", "ERASE", "EXCEPT", "EXISTS", "FLOW", "FROM", "FULL", "GLOBAL",
+                "HAVING", "HOP", "INTERSECT", "JSON_EXISTS", "JSON_QUERY", "JSON_VALUE", "LIMIT", "LIST", "LOCAL",
+                "NOT", "OPTIONAL", "PROCESS", "REDUCE", "REPEATABLE", "RESOURCE", "RETURN", "ROLLUP",
+                "SELECT", "SET", "STREAM", "STRUCT", "TAGGED", "TUPLE", "UNBOUNDED", "UNION", "VARIANT",
+                "WHEN", "WHERE", "WINDOW", "WITHOUT"
+            },
+            [](const TString& token){
+                TStringBuilder req;
+                req << "SELECT * FROM Plato.Input WHERE q IN " << token;
+                return req;
+            }
         );
         UNIT_ASSERT_VALUES_EQUAL(failed, TVector<TString>{});
     }
@@ -2312,6 +2402,40 @@ Y_UNIT_TEST_SUITE(SqlParsingOnly) {
         VerifyProgram(res, elementStat, verifyLine);
 
         UNIT_ASSERT_VALUES_EQUAL(1, elementStat["Write"]);
+    }
+
+    Y_UNIT_TEST(PragmaCompactGroupBy) {
+        auto req = "PRAGMA CompactGroupBy; SELECT key, COUNT(*) FROM plato.Input GROUP BY key;";
+        auto res = SqlToYql(req);
+        UNIT_ASSERT(res.Root);
+
+        TVerifyLineFunc verifyLine = [](const TString& word, const TString& line) {
+            if (word == "Aggregate") {
+                UNIT_ASSERT_VALUES_UNEQUAL(TString::npos, line.find("'('compact)"));
+            }
+        };
+
+        TWordCountHive elementStat = { {TString("Aggregate"), 0}};
+        VerifyProgram(res, elementStat, verifyLine);
+
+        UNIT_ASSERT_VALUES_EQUAL(1, elementStat["Aggregate"]);
+    }
+
+    Y_UNIT_TEST(PragmaDisableCompactGroupBy) {
+        auto req = "PRAGMA DisableCompactGroupBy; SELECT key, COUNT(*) FROM plato.Input GROUP /*+ compact() */ BY key;";
+        auto res = SqlToYql(req);
+        UNIT_ASSERT(res.Root);
+
+        TVerifyLineFunc verifyLine = [](const TString& word, const TString& line) {
+            if (word == "Aggregate") {
+                UNIT_ASSERT_VALUES_EQUAL(TString::npos, line.find("'('compact)"));
+            }
+        };
+
+        TWordCountHive elementStat = { {TString("Aggregate"), 0}};
+        VerifyProgram(res, elementStat, verifyLine);
+
+        UNIT_ASSERT_VALUES_EQUAL(1, elementStat["Aggregate"]);
     }
 }
 

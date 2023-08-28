@@ -204,6 +204,7 @@ NYson::EYsonFormat GetYsonFormat(const IDataProvider::TFillSettings& fillSetting
 
 TWriteTableSettings ParseWriteTableSettings(TExprList node, TExprContext& ctx) {
     TMaybeNode<TCoAtom> mode;
+    TMaybeNode<TCoAtom> temporary;
     TMaybeNode<TExprList> columns;
     TMaybeNode<TCoAtomList> primaryKey;
     TMaybeNode<TCoAtomList> notNullColumns;
@@ -220,7 +221,7 @@ TWriteTableSettings ParseWriteTableSettings(TExprList node, TExprContext& ctx) {
     TVector<TCoNameValueTuple> tableSettings;
     TVector<TCoNameValueTuple> alterActions;
     TMaybeNode<TCoAtom> tableType;
-    TMaybeNode<TCallable> pgDelete;
+    TMaybeNode<TCallable> pgFilter;
     for (auto child : node) {
         if (auto maybeTuple = child.Maybe<TCoNameValueTuple>()) {
             auto tuple = maybeTuple.Cast();
@@ -309,9 +310,11 @@ TWriteTableSettings ParseWriteTableSettings(TExprList node, TExprContext& ctx) {
             } else if (name == "serialColumns") {
                 YQL_ENSURE(tuple.Value().Maybe<TCoAtomList>());
                 serialColumns = tuple.Value().Cast<TCoAtomList>();
-            } else if (name == "pg_delete") {
+            } else if (name == "pg_delete" || name == "pg_update") {
                 YQL_ENSURE(tuple.Value().Maybe<TCallable>());
-                pgDelete = tuple.Value().Cast<TCallable>();
+                pgFilter = tuple.Value().Cast<TCallable>();
+            } else if (name == "temporary") {
+                temporary = Build<TCoAtom>(ctx, node.Pos()).Value("true").Done();
             } else {
                 other.push_back(tuple);
             }
@@ -348,6 +351,7 @@ TWriteTableSettings ParseWriteTableSettings(TExprList node, TExprContext& ctx) {
 
     TWriteTableSettings ret(otherSettings);
     ret.Mode = mode;
+    ret.Temporary = temporary;
     ret.Columns = columns;
     ret.PrimaryKey = primaryKey;
     ret.NotNullColumns = notNullColumns;
@@ -363,7 +367,7 @@ TWriteTableSettings ParseWriteTableSettings(TExprList node, TExprContext& ctx) {
     ret.TableSettings = tableProfileSettings;
     ret.AlterActions = alterTableActions;
     ret.TableType = tableType;
-    ret.PgDelete = pgDelete;
+    ret.PgFilter = pgFilter;
     return ret;
 }
 

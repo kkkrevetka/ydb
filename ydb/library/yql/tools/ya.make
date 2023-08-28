@@ -1,4 +1,6 @@
 RECURSE(
+    astdiff
     mrjob
-    mrjob/test
+    yqlrun
+    sql2yql
 )

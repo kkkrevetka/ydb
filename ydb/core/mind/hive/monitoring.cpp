@@ -1351,7 +1351,7 @@ public:
         /*out << "<tr><td>" << "Nodes:" << "</td><td id='aliveNodes'>" << (nodes == 0 ? 0 : aliveNodes * 100 / nodes) << "% "
             << aliveNodes << "/" << nodes << "</td></tr>";*/
         out << "<tr><td>" << "Tablets:" << "</td><td id='runningTablets'>" << GetRunningTabletsText(runningTablets, tablets, Self->WarmUp) << "</td></tr>";
-        out << "<tr><td><a role='button' data-toggle='modal' href='#rebalance'>Balancer:</a></td><td id='balancerProgress'>"
+        out << "<tr><td>Balancer:</td><td id='balancerProgress'>"
             << GetBalancerProgressText(Self->BalancerProgress, Self->LastBalancerTrigger) << "</td></tr>";
         out << "<tr><td>" << "Boot Queue:" << "</td><td id='bootQueue'>" << Self->BootQueue.BootQueue.size() << "</td></tr>";
         out << "<tr><td>" << "Wait Queue:" << "</td><td id='waitQueue'>" << Self->BootQueue.WaitQueue.size() << "</td></tr>";
@@ -1406,6 +1406,9 @@ public:
         out << "</div>";
         out << "<div class='col-sm-1 col-md-1' style='text-align:center'>";
         out << "<button type='button' class='btn btn-info' onclick='location.href=\"app?TabletID=" << Self->HiveId << "&page=MemStateDomains\";' style='width:138px'>Tenants</button>";
+        out << "</div>";
+        out << "<div class='col-sm-1 col-md-1' style='text-align:center'>";
+        out << "<button type='button' class='btn btn-info' data-toggle='modal' data-target='#rebalance' style='width:138px'>Balancer</button>";
         out << "</div>";
         out << "</div>";
 
@@ -1657,6 +1660,7 @@ public:
             initReassignGroups();
 
             var tablets_found;
+            var Nodes = {};
 
             function queryTablets() {
                 var storage_pool = $('#tablet_storage_pool').val();
@@ -1789,7 +1793,7 @@ public:
 
             function drainNode(element, nodeId) {
                 $(element).removeClass('glyphicon-transfer');
-                $.ajax({url:'app?TabletID=' + hiveId + '&node=' + nodeId + '&page=DrainNode', success: function(){ $(element).addClass('blinking'); }});
+                $.ajax({url:'app?TabletID=' + hiveId + '&node=' + nodeId + '&page=DrainNode', success: function(){ $(element).addClass('blinking'); Nodes[nodeId].Drain = true; }});
             }
 
             function rebalanceTablets() {
@@ -1814,7 +1818,6 @@ public:
 
         out << R"___(
 
-            var Nodes = {};
             var Empty = true;
 
             function onFreshData(result) {

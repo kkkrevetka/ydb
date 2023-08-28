@@ -278,7 +278,7 @@ struct TLeakyCounter
     TLeakyCounter(int windowSize, NProfiling::TGauge quotaGauge)
         : Value(std::make_shared<std::atomic<i64>>(0))
         , Window(windowSize)
-        , QuotaGauge_(std::move(quotaGauge))
+        , QuotaGauge(std::move(quotaGauge))
     { }
 
     std::shared_ptr<std::atomic<i64>> Value;
@@ -286,7 +286,7 @@ struct TLeakyCounter
     std::vector<i64> Window;
     int WindowPosition = 0;
 
-    NProfiling::TGauge QuotaGauge_;
+    NProfiling::TGauge QuotaGauge;
 
     i64 Increment(i64 delta)
     {
@@ -312,7 +312,7 @@ struct TLeakyCounter
         }
 
         *Value += delta;
-        QuotaGauge_.Update(Value->load());
+        QuotaGauge.Update(Value->load());
 
         return std::max<i64>(currentValue - maxValue, 0);
     }
@@ -345,6 +345,7 @@ public:
         : Logger(logger)
         , SharedBucket_(sharedBucket)
         , Value_(profiler.Counter("/value"))
+        , Released_(profiler.Counter("/released"))
         , WaitTime_(profiler.Timer("/wait_time"))
         , Quota_(config->BucketAccumulationTicks, profiler.Gauge("/quota"))
         , DistributionPeriod_(config->DistributionPeriod)
@@ -430,6 +431,20 @@ public:
 
         Value_.Increment(amount);
         Usage_ += amount;
+    }
+
+    void Release(i64 amount) override
+    {
+        YT_VERIFY(amount >= 0);
+
+        if (amount == 0) {
+            return;
+        }
+
+        *Quota_.Value += amount;
+        Usage_ -= amount;
+
+        Released_.Increment(amount);
     }
 
     bool IsOverdraft() override
@@ -560,6 +575,7 @@ private:
     TSharedBucketPtr SharedBucket_;
 
     NProfiling::TCounter Value_;
+    NProfiling::TCounter Released_;
     NProfiling::TEventTimer WaitTime_;
 
     TLeakyCounter Quota_;

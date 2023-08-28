@@ -7,6 +7,7 @@
 #include "type_ann_wide.h"
 #include "type_ann_types.h"
 #include "type_ann_pg.h"
+#include "type_ann_match_recognize.h"
 
 #include <ydb/library/yql/core/yql_atom_enums.h>
 #include <ydb/library/yql/core/yql_expr_optimize.h>
@@ -6229,6 +6230,16 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         return IGraphTransformer::TStatus::Ok;
     }
 
+    IGraphTransformer::TStatus CostsOfWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TContext& ctx) {
+        Y_UNUSED(output);
+        if (!EnsureArgsCount(*input, 1, ctx.Expr)) {
+            return IGraphTransformer::TStatus::Error;
+        }
+
+        input->SetTypeAnn(ctx.Expr.MakeType<TDataExprType>(EDataSlot::Json));
+        return IGraphTransformer::TStatus::Ok;
+    }
+
     IGraphTransformer::TStatus InstanceOfWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TContext& ctx) {
         Y_UNUSED(output);
         if (!EnsureArgsCount(*input, 1, ctx.Expr)) {
@@ -11770,6 +11781,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["HasNull"] = &HasNullWrapper;
         Functions["TypeOf"] = &TypeOfWrapper;
         Functions["ConstraintsOf"] = &ConstraintsOfWrapper;
+        Functions["CostsOf"] = &CostsOfWrapper;
         Functions["InstanceOf"] = &InstanceOfWrapper;
         Functions["SourceOf"] = &SourceOfWrapper;
         Functions["MatchType"] = &MatchTypeWrapper;
@@ -11828,6 +11840,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["NewMTRand"] = &NewMTRandWrapper;
         Functions["NextMTRand"] = &NextMTRandWrapper;
         Functions["FormatType"] = &FormatTypeWrapper;
+        Functions["FormatTypeDiff"] = &FormatTypeDiffWrapper;
         Functions["CastStruct"] = &CastStructWrapper;
         Functions["AggregationTraits"] = &AggregationTraitsWrapper;
         Functions["MultiAggregate"] = &MultiAggregateWrapper;
@@ -12018,6 +12031,8 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["ListAny"] = &ListAllAnyWrapper<false>;
         Functions["ListNotNull"] = &ListNotNullWrapper;
         Functions["ListFlatten"] = &ListFlattenWrapper;
+        Functions["ListUniq"] = &ListUniqWrapper;
+        Functions["ListUniqStable"] = &ListUniqWrapper;
 
         Functions["ExpandMap"] = &ExpandMapWrapper;
         Functions["WideMap"] = &WideMapWrapper;
@@ -12086,6 +12101,13 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["RoundUp"] = &RoundWrapper;
         Functions["RoundDown"] = &RoundWrapper;
         Functions["NextValue"] = &NextValueWrapper;
+
+        Functions["MatchRecognize"] = &MatchRecognizeWrapper;
+        Functions["MatchRecognizeParams"] = &MatchRecognizeParamsWrapper;
+        Functions["MatchRecognizeMeasures"] = &MatchRecognizeMeasuresWrapper;
+        Functions["MatchRecognizePattern"] = &MatchRecognizePatternWrapper;
+        Functions["MatchRecognizeDefines"] = &MatchRecognizeDefinesWrapper;
+        Functions["MatchRecognizeCore"] = &MatchRecognizeCoreWrapper;
 
         Functions["FromPg"] = &FromPgWrapper;
         Functions["ToPg"] = &ToPgWrapper;

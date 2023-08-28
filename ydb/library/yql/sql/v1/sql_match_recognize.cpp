@@ -1,6 +1,8 @@
 #include "sql_match_recognize.h"
 #include "node.h"
 #include "sql_expression.h"
+#include <ydb/library/yql/core/sql_types/match_recognize.h>
+
 namespace NSQLTranslationV1 {
 
 using namespace NSQLv1Generated;
@@ -13,6 +15,22 @@ TPosition TokenPosition(const TToken& token){
 
 TString PatternVar(const TRule_row_pattern_variable_name& node, TSqlMatchRecognizeClause& ctx){
     return Id(node.GetRule_identifier1(), ctx);
+}
+
+std::unordered_set<TString> GetAllPatternVars(const TRowPatternPtr& pattern){
+    std::unordered_set<TString> result;
+    for (const auto& t: pattern->Terms) {
+        for (const auto& f: t) {
+            if (f.Primary.index() == 0) {
+                result.insert(std::get<0>(f.Primary));
+            }
+            else {
+                auto nested = GetAllPatternVars(std::get<1>(f.Primary));
+                result.insert(nested.cbegin(), nested.cend());
+            }
+        }
+    }
+    return result;
 }
 
 } //namespace
@@ -63,11 +81,6 @@ TMatchRecognizeBuilderPtr TSqlMatchRecognizeClause::CreateBuilder(const NSQLv1Ge
 
     const auto& commonSyntax = matchRecognizeClause.GetRule_row_pattern_common_syntax7();
 
-    std::pair<TPosition, TAfterMatchSkipTo> skipTo { pos, TAfterMatchSkipTo{EAfterMatchSkipTo::NextRow, TString()} };
-    if (commonSyntax.HasBlock1()){
-        skipTo = ParseAfterMatchSkipTo(commonSyntax.GetBlock1().GetRule_row_pattern_skip_to3());
-        //TODO validate var with the name defined in the pattern https://st.yandex-team.ru/YQL-16186
-    }
 
     if (commonSyntax.HasBlock2()) {
         const auto& initialOrSeek = commonSyntax.GetBlock2().GetRule_row_pattern_initial_or_seek1();
@@ -77,6 +90,25 @@ TMatchRecognizeBuilderPtr TSqlMatchRecognizeClause::CreateBuilder(const NSQLv1Ge
 
     auto pattern = ParsePattern(commonSyntax.GetRule_row_pattern5());
     const auto& patternPos = TokenPosition(commonSyntax.token3());
+
+    //this block is located before pattern block in grammar,
+    // but depends on it, so it is processed after pattern block
+    std::pair<TPosition, TAfterMatchSkipTo> skipTo { pos, TAfterMatchSkipTo{EAfterMatchSkipTo::NextRow, TString()} };
+    if (commonSyntax.HasBlock1()){
+        skipTo = ParseAfterMatchSkipTo(commonSyntax.GetBlock1().GetRule_row_pattern_skip_to3());
+        const auto varRequired =
+                EAfterMatchSkipTo::ToFirst == skipTo.second.To ||
+                EAfterMatchSkipTo::ToLast == skipTo.second.To ||
+                EAfterMatchSkipTo::To == skipTo.second.To;
+        if (varRequired) {
+            const auto& allVars = GetAllPatternVars(pattern);
+            if (allVars.find(skipTo.second.Var) == allVars.cend()) {
+                Ctx.Error(skipTo.first) << "Unknown pattern variable in AFTER MATCH";
+                return {};
+            }
+        }
+    }
+
 
     TNodePtr subset;
     TPosition subsetPos = pos;
@@ -178,7 +210,7 @@ std::pair<TPosition, TAfterMatchSkipTo> TSqlMatchRecognizeClause::ParseAfterMatc
                     TokenPosition(skipToClause.GetAlt_row_pattern_skip_to3().GetToken1()),
                     TAfterMatchSkipTo{
                             EAfterMatchSkipTo::ToFirst,
-                            skipToClause.GetAlt_row_pattern_skip_to3().GetToken1().GetValue()
+                            skipToClause.GetAlt_row_pattern_skip_to3().GetRule_row_pattern_skip_to_variable_name4().GetRule_row_pattern_variable_name1().GetRule_identifier1().GetToken1().GetValue()
                     }
             };
         case TRule_row_pattern_skip_to::kAltRowPatternSkipTo4:
@@ -186,7 +218,7 @@ std::pair<TPosition, TAfterMatchSkipTo> TSqlMatchRecognizeClause::ParseAfterMatc
                     TokenPosition(skipToClause.GetAlt_row_pattern_skip_to4().GetToken1()),
                     TAfterMatchSkipTo{
                             EAfterMatchSkipTo::ToLast,
-                            skipToClause.GetAlt_row_pattern_skip_to4().GetToken1().GetValue()
+                            skipToClause.GetAlt_row_pattern_skip_to4().GetRule_row_pattern_skip_to_variable_name4().GetRule_row_pattern_variable_name1().GetRule_identifier1().GetToken1().GetValue()
                     }
             };
         case TRule_row_pattern_skip_to::kAltRowPatternSkipTo5:
@@ -194,7 +226,7 @@ std::pair<TPosition, TAfterMatchSkipTo> TSqlMatchRecognizeClause::ParseAfterMatc
                     TokenPosition(skipToClause.GetAlt_row_pattern_skip_to5().GetToken1()),
                     TAfterMatchSkipTo{
                             EAfterMatchSkipTo::To,
-                            skipToClause.GetAlt_row_pattern_skip_to5().GetToken1().GetValue()
+                            skipToClause.GetAlt_row_pattern_skip_to5().GetRule_row_pattern_skip_to_variable_name3().GetRule_row_pattern_variable_name1().GetRule_identifier1().GetToken1().GetValue()
                     }
             };
         case TRule_row_pattern_skip_to::ALT_NOT_SET:
@@ -222,8 +254,7 @@ TRowPatternTerm TSqlMatchRecognizeClause::ParsePatternTerm(const TRule_row_patte
                 Y_ENSURE("^" == std::get<0>(primary));
                 break;
             case TRule_row_pattern_primary::kAltRowPatternPrimary4: {
-                constexpr size_t MaxNesting = 20; //Limit recursion
-                if (++PatternNestingLevel <= MaxNesting) {
+                if (++PatternNestingLevel <= MaxMatchRecognizePatternNesting) {
                     primary = ParsePattern(primaryVar.GetAlt_row_pattern_primary4().GetBlock2().GetRule_row_pattern1());
                 } else {
                     Ctx.Error(TokenPosition(primaryVar.GetAlt_row_pattern_primary4().GetToken1()))

@@ -769,8 +769,11 @@ public:
         return TDuration::MilliSeconds(CurrentConfig.GetTabletRestartsPeriod());
     }
 
-    ui64 GetTabletRestarsMaxCount() const {
-        return CurrentConfig.GetTabletRestarsMaxCount();
+    ui64 GetTabletRestartsMaxCount() const {
+        if (CurrentConfig.HasTabletRestarsMaxCount() && !CurrentConfig.HasTabletRestartsMaxCount()) {
+            return CurrentConfig.GetTabletRestarsMaxCount();
+        }
+        return CurrentConfig.GetTabletRestartsMaxCount();
     }
 
     TDuration GetPostponeStartPeriod() const {
@@ -828,6 +831,10 @@ public:
 
     ui64 GetNodeRestartsToIgnoreInWarmup() const {
         return CurrentConfig.GetNodeRestartsToIgnoreInWarmup();
+    }
+
+    NKikimrConfig::THiveConfig::EHiveBootStrategy GetBootStrategy() const {
+        return CurrentConfig.GetBootStrategy();
     }
 
     static void ActualizeRestartStatistics(google::protobuf::RepeatedField<google::protobuf::uint64>& restartTimestamps, ui64 barrier);

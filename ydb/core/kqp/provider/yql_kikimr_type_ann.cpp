@@ -287,6 +287,48 @@ namespace {
         }
         return true;
     }
+
+    bool ValidatePgUpdateKeys(const TKiWriteTable& node, const TKikimrTableDescription* table, TExprContext& ctx) {
+        bool ok = true;
+        auto updateKeyCheck = [&](const TStringBuf& colName) {
+            if (table->GetKeyColumnIndex(TString(colName))) {
+                ctx.AddError(TIssue(ctx.GetPosition(node.Pos()), TStringBuilder()
+                    << "Cannot update primary key column: " << colName));
+                ok = false;
+            }
+        };
+        auto pgSelect = node.Input().Cast<TCoPgSelect>();
+        for (const auto& option : pgSelect.SelectOptions()) {
+            if (option.Name() == "set_items") {
+                auto pgSetItems = option.Value().Cast<TExprList>();
+                for (const auto& setItem : pgSetItems) {
+                    auto setItemNode = setItem.Cast<TCoPgSetItem>();
+                    for (const auto& setItemOption : setItemNode.SetItemOptions()) {
+                        if (setItemOption.Name() == "result") {
+                            auto resultList = setItemOption.Value().Cast<TExprList>();
+                            bool skipStar = true;
+                            for (const auto& pgResultItem : resultList) {
+                                if (skipStar) {
+                                    skipStar = false;
+                                    continue;
+                                }
+                                auto pgResultNode = pgResultItem.Cast<TCoPgResultItem>();
+                                if (pgResultNode.ExpandedColumns().Maybe<TExprList>()) {
+                                    auto list = pgResultNode.ExpandedColumns().Cast<TExprList>();
+                                    for (const auto& item : list) {
+                                        updateKeyCheck(item.Cast<TCoAtom>().Value());
+                                    }
+                                } else {
+                                    updateKeyCheck(pgResultNode.ExpandedColumns().Cast<TCoAtom>().Value());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return ok;
+    }
 }
 
 class TKiSinkTypeAnnotationTransformer : public TKiSinkVisitorTransformer
@@ -421,6 +463,12 @@ private:
                 }
             }
         } else if (op == TYdbOperation::UpdateOn) {
+            if (TCoPgSelect::Match(node.Input().Ptr().Get())) {
+                auto ok = ValidatePgUpdateKeys(node, table, ctx);
+                if (!ok) {
+                    return TStatus::Error;
+                }
+            }
             for (const auto& item : rowType->GetItems()) {
                 auto column = table->Metadata->Columns.FindPtr(TString(item->GetName()));
                 YQL_ENSURE(column);
@@ -609,6 +657,8 @@ virtual TStatus HandleCreateTable(TKiCreateTable create, TExprContext& ctx) over
             return TStatus::Error;
         }
         meta->TableType = tableTypeEnum;
+
+        meta->Temporary = TString(create.Temporary()) == "true" ? true : false;
 
         for (auto atom : create.PrimaryKey()) {
             meta->KeyColumnNames.emplace_back(atom.Value());
@@ -1062,14 +1112,17 @@ virtual TStatus HandleCreateTable(TKiCreateTable create, TExprContext& ctx) over
 
 
     virtual TStatus HandleDropTable(TKiDropTable node, TExprContext& ctx) override {
-        auto table = SessionCtx->Tables().EnsureTableExists(TString(node.DataSink().Cluster()), TString(node.Table().Value()), node.Pos(), ctx);
-        if (!table) {
-            return TStatus::Error;
-        }
-
-        if (table->GetTableType() == ETableType::Table) {
-            if (!CheckDocApiModifiation(*table->Metadata, node.Pos(), ctx)) {
+        bool missingOk = (node.MissingOk().Value() == "1");
+        if (!missingOk) {
+            auto table = SessionCtx->Tables().EnsureTableExists(TString(node.DataSink().Cluster()), TString(node.Table().Value()), node.Pos(), ctx);
+            if (!table) {
                 return TStatus::Error;
+            }
+
+            if (table->GetTableType() == ETableType::Table) {
+                if (!CheckDocApiModifiation(*table->Metadata, node.Pos(), ctx)) {
+                    return TStatus::Error;
+                }
             }
         }
 

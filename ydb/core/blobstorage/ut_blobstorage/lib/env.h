@@ -5,6 +5,7 @@
 #include "node_warden_mock.h"
 
 #include <ydb/core/driver_lib/version/version.h>
+
 #include <library/cpp/testing/unittest/registar.h>
 
 struct TEnvironmentSetup {
@@ -679,16 +680,22 @@ struct TEnvironmentSetup {
         UNIT_ASSERT(response.GetSuccess());
     }
 
-    void PutVDiskToReadOnly(ui32 nodeId, ui32 pdiskId, ui32 vslotId, const TVDiskID& vdiskId) {
-        NKikimrBlobStorage::TConfigRequest request;
-        auto *roCmd = request.AddCommand()->MutablePutVDiskToReadOnly();
-        auto *vslot = roCmd->MutableVSlotId();
+    void FillVSlotId(ui32 nodeId, ui32 pdiskId, ui32 vslotId, NKikimrBlobStorage::TVSlotId* vslot) {
         vslot->SetNodeId(nodeId);
         vslot->SetPDiskId(pdiskId);
         vslot->SetVSlotId(vslotId);
+    }
+
+    void SetVDiskReadOnly(ui32 nodeId, ui32 pdiskId, ui32 vslotId, const TVDiskID& vdiskId, bool value) {
+        NKikimrBlobStorage::TConfigRequest request;
+        auto *roCmd = request.AddCommand()->MutableSetVDiskReadOnly();
+        FillVSlotId(nodeId, pdiskId, vslotId, roCmd->MutableVSlotId());
         VDiskIDFromVDiskID(vdiskId, roCmd->MutableVDiskId());
+        roCmd->SetValue(value);
+        Cerr << "Invoking SetVDiskReadOnly for vdisk " << vdiskId.ToString() << Endl;
         auto response = Invoke(request);
         UNIT_ASSERT_C(response.GetSuccess(), response.GetErrorDescription());
+
     }
 
     void UpdateDriveStatus(ui32 nodeId, ui32 pdiskId, NKikimrBlobStorage::EDriveStatus status,

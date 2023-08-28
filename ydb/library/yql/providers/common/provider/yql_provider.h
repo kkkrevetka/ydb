@@ -34,6 +34,7 @@ namespace NCommon {
 
 struct TWriteTableSettings {
     NNodes::TMaybeNode<NNodes::TCoAtom> Mode;
+    NNodes::TMaybeNode<NNodes::TCoAtom> Temporary;
     NNodes::TMaybeNode<NNodes::TExprList> Columns;
     NNodes::TMaybeNode<NNodes::TCoAtomList> PrimaryKey;
     NNodes::TMaybeNode<NNodes::TCoAtomList> NotNullColumns;
@@ -50,7 +51,7 @@ struct TWriteTableSettings {
     NNodes::TMaybeNode<NNodes::TCoNameValueTupleList> TableSettings;
     NNodes::TMaybeNode<NNodes::TCoNameValueTupleList> AlterActions;
     NNodes::TMaybeNode<NNodes::TCoAtom> TableType;
-    NNodes::TMaybeNode<NNodes::TCallable> PgDelete;
+    NNodes::TMaybeNode<NNodes::TCallable> PgFilter;
 
     TWriteTableSettings(const NNodes::TCoNameValueTupleList& other)
         : Other(other) {}

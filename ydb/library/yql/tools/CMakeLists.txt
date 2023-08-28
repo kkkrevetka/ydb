@@ -6,4 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(astdiff)
 add_subdirectory(mrjob)
+add_subdirectory(sql2yql)
+add_subdirectory(yqlrun)

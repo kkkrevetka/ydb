@@ -1968,6 +1968,24 @@ TNodePtr TSqlQuery::PragmaStatement(const TRule_pragma_stmt& stmt, bool& success
                 return {};
             }
             Ctx.IncrementMonCounter("sql_pragma", "FeatureR010");
+        } else if (normalizedPragma == "compactgroupby") {
+            Ctx.CompactGroupBy = true;
+            Ctx.IncrementMonCounter("sql_pragma", "CompactGroupBy");
+        } else if (normalizedPragma == "disablecompactgroupby") {
+            Ctx.CompactGroupBy = false;
+            Ctx.IncrementMonCounter("sql_pragma", "DisableCompactGroupBy");
+        } else if (normalizedPragma == "costbasedoptimizer") {
+            Ctx.IncrementMonCounter("sql_pragma", "CostBasedOptimizer");
+            if (values.size() == 1 && values[0].GetLiteral()) {
+                Ctx.CostBasedOptimizer = to_lower(*values[0].GetLiteral());
+            }
+            if (values.size() != 1 || !values[0].GetLiteral()
+                || ! (Ctx.CostBasedOptimizer == "disable" || Ctx.CostBasedOptimizer == "pg" || Ctx.CostBasedOptimizer == "native"))
+            {
+                Error() << "Expected `disable|pg|native' argument for: " << pragma;
+                Ctx.IncrementMonCounter("sql_errors", "BadPragmaValue");
+                return {};
+            }
         } else {
             Error() << "Unknown pragma: " << pragma;
             Ctx.IncrementMonCounter("sql_errors", "UnknownPragma");

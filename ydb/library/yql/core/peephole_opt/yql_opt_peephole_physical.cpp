@@ -8,6 +8,7 @@
 #include <ydb/library/yql/core/yql_opt_range.h>
 #include <ydb/library/yql/core/yql_opt_utils.h>
 #include <ydb/library/yql/core/yql_opt_window.h>
+#include <ydb/library/yql/core/yql_opt_match_recognize.h>
 #include <ydb/library/yql/core/yql_join.h>
 #include <ydb/library/yql/core/expr_nodes/yql_expr_nodes.h>
 #include <ydb/library/yql/core/common_opt/yql_co_transformer.h>
@@ -5666,6 +5667,57 @@ TExprNode::TPtr ExpandConstraintsOf(const TExprNode::TPtr& node, TExprContext& c
         .Build();
 }
 
+TExprNode::TPtr ExpandCostsOf(const TExprNode::TPtr& node, TExprContext& ctx, TTypeAnnotationContext& typesCtx) {
+    YQL_CLOG(DEBUG, CorePeepHole) << "Expand " << node->Content();
+
+    TString json;
+    TStringOutput out(json);
+    NJson::TJsonWriter jsonWriter(&out, true);
+
+    VisitExpr(node, [&](const TExprNode::TPtr& node) {
+        auto stat = typesCtx.GetStats(node.Get());
+
+        if (stat || node->ChildrenSize()) {
+            jsonWriter.OpenMap();
+            jsonWriter.WriteKey("Name");
+            jsonWriter.Write(node->Content());
+            if (stat) {
+                if (stat->Cost) {
+                    jsonWriter.WriteKey("Cost");
+                    jsonWriter.Write(*stat->Cost);
+                }
+                jsonWriter.WriteKey("Cols");
+                jsonWriter.Write(stat->Ncols);
+                jsonWriter.WriteKey("Rows");
+                jsonWriter.Write(stat->Nrows);
+            }
+            if (node->ChildrenSize()) {
+                jsonWriter.WriteKey("Children");
+                jsonWriter.OpenArray();
+            }
+        }
+        return true;
+    }, [&](const TExprNode::TPtr& node) {
+        auto stat = typesCtx.GetStats(node.Get());
+
+        if (stat || node->ChildrenSize()) {
+            if (node->ChildrenSize()) {
+                jsonWriter.CloseArray();
+            }
+            jsonWriter.CloseMap();
+        }
+        return true;
+    });
+
+    jsonWriter.Flush();
+
+    return ctx.Builder(node->Pos())
+        .Callable("Json")
+            .Atom(0, json, TNodeFlags::MultilineContent)
+        .Seal()
+        .Build();
+}
+
 TExprNode::TPtr OptimizeMapJoinCore(const TExprNode::TPtr& node, TExprContext& ctx) {
     if (const auto& input = node->Head(); input.IsCallable("NarrowMap") && input.Tail().Tail().IsCallable("AsStruct")) {
         YQL_CLOG(DEBUG, CorePeepHole) << "Swap " << node->Content() << " with " << input.Content();
@@ -7113,7 +7165,7 @@ TExprNode::TPtr ExpandCheckedMinus(const TExprNode::TPtr& node, TExprContext& ct
         .Build();
 }
 
-TExprNode::TPtr DropUnordered(const TExprNode::TPtr& node, TExprContext&) {
+TExprNode::TPtr DropAssume(const TExprNode::TPtr& node, TExprContext&) {
     YQL_CLOG(DEBUG, CorePeepHole) << "Drop " << node->Content();
     return node->HeadPtr();
 }
@@ -7189,7 +7241,8 @@ struct TPeepHoleRules {
         {"CheckedMod", &ExpandCheckedMod},
         {"CheckedMinus", &ExpandCheckedMinus},
         {"JsonValue", &ExpandJsonValue},
-        {"JsonExists", &ExpandJsonExists}
+        {"JsonExists", &ExpandJsonExists},
+        {"MatchRecognize", &ExpandMatchRecognize}
     };
 
     static constexpr std::initializer_list<TExtPeepHoleOptimizerMap::value_type> CommonStageExtRulesInit = {
@@ -7200,6 +7253,7 @@ struct TPeepHoleRules {
         {"AggregateMergeFinalize", &ExpandAggregatePeephole},
         {"AggregateMergeManyFinalize", &ExpandAggregatePeephole},
         {"AggregateFinalize", &ExpandAggregatePeephole},
+        {"CostsOf", &ExpandCostsOf},
         {"JsonQuery", &ExpandJsonQuery},
     };
 
@@ -7264,7 +7318,10 @@ struct TPeepHoleRules {
         {"NarrowMultiMap", &OptimizeWideMaps},
         {"WideMap", &OptimizeWideMaps},
         {"NarrowMap", &OptimizeWideMaps},
-        {"Unordered", &DropUnordered},
+        {"Unordered", &DropAssume},
+        {"AssumeUnique", &DropAssume},
+        {"AssumeDistinct", &DropAssume},
+        {"AssumeChopped", &DropAssume},
         {"Top", &OptimizeTopOrSort<false, true>},
         {"TopSort", &OptimizeTopOrSort<true, true>},
         {"Sort", &OptimizeTopOrSort<true, false>},

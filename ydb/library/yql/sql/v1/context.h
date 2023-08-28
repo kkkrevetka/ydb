@@ -256,6 +256,7 @@ namespace NSQLTranslationV1 {
         bool EnableSystemColumns = true;
         bool DqEngineEnable = false;
         bool DqEngineForce = false;
+        TString CostBasedOptimizer;
         TMaybe<bool> JsonQueryReturnsJsonDocument;
         TMaybe<bool> AnsiInForEmptyOrNullableItemsCollections;
         TMaybe<bool> AnsiRankForNullableKeys = true;
@@ -299,6 +300,7 @@ namespace NSQLTranslationV1 {
         bool UseBlocks = false;
         bool AnsiLike = false;
         bool FeatureR010 = false; //Row pattern recognition: FROM clause
+        TMaybe<bool> CompactGroupBy;
     };
 
     class TColumnRefScope {

@@ -27,6 +27,8 @@ SRCS(
     yql_join.cpp
     yql_join.h
     yql_library_compiler.cpp
+    yql_opt_match_recognize.cpp
+    yql_opt_match_recognize.h
     yql_opt_proposed_by_data.cpp
     yql_opt_proposed_by_data.h
     yql_opt_range.cpp
@@ -89,5 +91,26 @@ GENERATE_ENUM_SERIALIZATION(yql_type_annotation.h)
 YQL_LAST_ABI_VERSION()
 
 END()
+
+RECURSE(
+    arrow_kernels
+    cbo
+    common_opt
+    credentials
+    expr_nodes
+    expr_nodes_gen
+    extract_predicate
+    facade
+    file_storage
+    issue
+    peephole_opt
+    services
+    spilling
+    sql_types
+    type_ann
+    url_lister
+    url_preprocessing
+    user_data
+)
 
 RECURSE_FOR_TESTS(ut)

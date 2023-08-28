@@ -59,6 +59,7 @@ TExprNode::TPtr BuildExternalTableSettings(TPositionHandle pos, TExprContext& ct
 
         items.emplace_back(ctx.NewList(pos, std::move(children)));
     }
+
     return ctx.NewList(pos, std::move(items));
 }
 
@@ -187,7 +188,8 @@ public:
                 IKikimrGateway::TLoadTableMetadataSettings()
                             .WithTableStats(table.GetNeedsStats())
                             .WithPrivateTables(IsInternalCall)
-                            .WithExternalDatasources(SessionCtx->Config().FeatureFlags.GetEnableExternalDataSources()));
+                            .WithExternalDatasources(SessionCtx->Config().FeatureFlags.GetEnableExternalDataSources())
+            );
 
             futures.push_back(future.Apply([result, queryType]
                 (const NThreading::TFuture<IKikimrGateway::TTableMetadataResult>& future) {
@@ -307,10 +309,15 @@ public:
 
             if (res.Success()) {
                 res.ReportIssues(ctx.IssueManager);
-                auto& tableDesc = SessionCtx->Tables().GetTable(it.first.first, it.first.second);
+                TKikimrTableDescription* tableDesc;
+                if (res.Metadata->Temporary) {
+                    tableDesc = &SessionCtx->Tables().GetTable(it.first.first, *res.Metadata->QueryName);
+                } else {
+                    tableDesc = &SessionCtx->Tables().GetTable(it.first.first, it.first.second);
+                }
 
                 YQL_ENSURE(res.Metadata);
-                tableDesc.Metadata = res.Metadata;
+                tableDesc->Metadata = res.Metadata;
 
                 bool sysColumnsEnabled = SessionCtx->Config().SystemColumnsEnabled();
                 YQL_ENSURE(res.Metadata->Indexes.size() == res.Metadata->SecondaryGlobalIndexMetadata.size());
@@ -321,7 +328,7 @@ public:
                     desc.Load(ctx, sysColumnsEnabled);
                 }
 
-                if (!tableDesc.Load(ctx, sysColumnsEnabled)) {
+                if (!tableDesc->Load(ctx, sysColumnsEnabled)) {
                     LoadResults.clear();
                     return TStatus::Error;
                 }
@@ -683,7 +690,7 @@ public:
                     .Repeat(TExprStep::RewriteIO);
             TExprNode::TPtr path = ctx.NewCallable(node->Pos(), "String", { ctx.NewAtom(node->Pos(), tableDesc.Metadata->ExternalSource.TableLocation) });
             auto table = ctx.NewList(node->Pos(), {ctx.NewAtom(node->Pos(), "table"), path});
-            auto key = ctx.NewCallable(node->Pos(), "Key", {table});
+            auto newKey = ctx.NewCallable(node->Pos(), "Key", {table});
             auto newRead = Build<TCoRead>(ctx, node->Pos())
                                     .World(read->Child(0))
                                     .DataSource(
@@ -695,9 +702,10 @@ public:
                                         .Done().Ptr()
                                     )
                                     .FreeArgs()
-                                        .Add(ctx.NewCallable(node->Pos(), "MrTableConcat", {key}))
+                                        .Add(ctx.NewCallable(node->Pos(), "MrTableConcat", {newKey}))
                                         .Add(ctx.NewCallable(node->Pos(), "Void", {}))
                                         .Add(BuildExternalTableSettings(node->Pos(), ctx, tableDesc.Metadata->Columns, source, tableDesc.Metadata->ExternalSource.TableContent))
+
                                     .Build()
                                     .Done().Ptr();
             auto retChildren = node->ChildrenList();

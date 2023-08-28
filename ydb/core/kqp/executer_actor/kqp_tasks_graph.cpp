@@ -854,6 +854,7 @@ void FillTaskMeta(const TStageInfo& stageInfo, const TTask& task, NYql::NDqProto
 
         switch (tableInfo->TableKind) {
             case ETableKind::Unknown:
+            case ETableKind::External:
             case ETableKind::SysView: {
                 protoTaskMeta.SetDataFormat(NKikimrTxDataShard::EScanDataFormat::CELLVEC);
                 break;
@@ -1077,6 +1078,10 @@ void SerializeTaskToProto(const TKqpTasksGraph& tasksGraph, const TTask& task, N
 
     for (const auto& [paramName, paramValue] : task.Meta.TaskParams) {
         (*result->MutableTaskParams())[paramName] = paramValue;
+    }
+
+    for (const auto& readRange : task.Meta.ReadRanges) {
+        result->AddReadRanges(readRange);
     }
 
     for (const auto& [paramName, paramValue] : task.Meta.SecureParams) {

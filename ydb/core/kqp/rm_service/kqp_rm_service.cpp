@@ -150,7 +150,9 @@ public:
         }
         ActorSystem = actorSystem;
         SelfId = selfId;
-        UpdatePatternCache(Config.GetKqpPatternCacheCapacityBytes(), Config.GetKqpPatternCachePatternAccessTimesBeforeTryToCompile());
+        UpdatePatternCache(Config.GetKqpPatternCacheCapacityBytes(),
+            Config.GetKqpPatternCacheCompiledCapacityBytes(),
+            Config.GetKqpPatternCachePatternAccessTimesBeforeTryToCompile());
 
         if (PublishResourcesByExchanger) {
             CreateResourceInfoExchanger(Config.GetInfoExchangerSettings());
@@ -314,6 +316,11 @@ public:
     }
 
     void FreeResources(ui64 txId, ui64 taskId, const TKqpResourcesRequest& resources) override {
+
+        if (resources.MemoryPool == EKqpMemoryPool::DataQuery) {
+            NotifyExternalResourcesFreed(txId, taskId, resources);
+            return;
+        }
 
         auto& txBucket = TxBucket(txId);
 
@@ -490,6 +497,50 @@ public:
         FireResourcesPublishing();
     }
 
+    void NotifyExternalResourcesFreed(ui64 txId, ui64 taskId, const TKqpResourcesRequest& resources) override {
+        LOG_AS_D("TxId: " << txId << ", taskId: " << taskId << ". External free: " << resources.ToString());
+
+        YQL_ENSURE(resources.MemoryPool == EKqpMemoryPool::DataQuery);
+
+        ui64 releaseMemory = 0;
+
+        auto& txBucket = TxBucket(txId);
+        with_lock (txBucket.Lock) {
+            auto txIt = txBucket.Txs.find(txId);
+            if (txIt == txBucket.Txs.end()) {
+                return;
+            }
+
+            auto taskIt = txIt->second.Tasks.find(taskId);
+            if (taskIt == txIt->second.Tasks.end()) {
+                return;
+            }
+
+            if (taskIt->second.ExternalDataQueryMemory <= resources.Memory) {
+                releaseMemory = taskIt->second.ExternalDataQueryMemory;
+                if (txIt->second.Tasks.size() == 1) {
+                    txBucket.Txs.erase(txId);
+                } else {
+                    txIt->second.Tasks.erase(taskIt);
+                    txIt->second.TxExternalDataQueryMemory -= releaseMemory;
+                }
+            } else {
+                releaseMemory = resources.Memory;
+                taskIt->second.ExternalDataQueryMemory -= resources.Memory;
+            }
+        } // with_lock (txBucket.Lock)
+
+        with_lock (Lock) {
+            Y_VERIFY_DEBUG(ExternalDataQueryMemory >= releaseMemory);
+            ExternalDataQueryMemory -= releaseMemory;
+        } // with_lock (Lock)
+
+        Counters->RmExternalMemory->Sub(releaseMemory);
+        Y_VERIFY_DEBUG(Counters->RmExternalMemory->Val() >= 0);
+
+        FireResourcesPublishing();
+    }
+
     void NotifyExternalResourcesFreed(ui64 txId, ui64 taskId) override {
         LOG_AS_D("TxId: " << txId << ", taskId: " << taskId << ". External free.");
 
@@ -619,13 +670,13 @@ public:
         ActorSystem->Send(SelfId, new TEvPrivate::TEvSchedulePublishResources);
     }
 
-    void UpdatePatternCache(ui64 maxSizeBytes, ui64 patternAccessTimesBeforeTryToCompile) {
+    void UpdatePatternCache(ui64 maxSizeBytes, ui64 maxCompiledSizeBytes, ui64 patternAccessTimesBeforeTryToCompile) {
         if (maxSizeBytes == 0) {
             PatternCache.reset();
             return;
         }
 
-        NMiniKQL::TComputationPatternLRUCache::Config config{maxSizeBytes, patternAccessTimesBeforeTryToCompile};
+        NMiniKQL::TComputationPatternLRUCache::Config config{maxSizeBytes, maxCompiledSizeBytes, patternAccessTimesBeforeTryToCompile};
         if (!PatternCache || PatternCache->GetConfiguration() != config) {
             PatternCache = std::make_shared<NMiniKQL::TComputationPatternLRUCache>(config, Counters->GetKqpCounters());
         }
@@ -888,7 +939,9 @@ private:
         Send(ev->Sender, new NConsole::TEvConsole::TEvConfigNotificationResponse(event), IEventHandle::FlagTrackDelivery, ev->Cookie);
 
         auto& config = *event.MutableConfig()->MutableTableServiceConfig()->MutableResourceManager();
-        ResourceManager->UpdatePatternCache(config.GetKqpPatternCacheCapacityBytes(), config.GetKqpPatternCachePatternAccessTimesBeforeTryToCompile());
+        ResourceManager->UpdatePatternCache(config.GetKqpPatternCacheCapacityBytes(),
+            config.GetKqpPatternCacheCompiledCapacityBytes(),
+            config.GetKqpPatternCachePatternAccessTimesBeforeTryToCompile());
 
         bool enablePublishResourcesByExchanger = config.GetEnablePublishResourcesByExchanger();
         if (enablePublishResourcesByExchanger != PublishResourcesByExchanger) {

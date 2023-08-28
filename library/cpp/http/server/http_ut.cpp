@@ -9,6 +9,7 @@
 #include <util/stream/zlib.h>
 #include <util/system/datetime.h>
 #include <util/system/mutex.h>
+#include <util/random/random.h>
 
 Y_UNIT_TEST_SUITE(THttpServerTest) {
     class TEchoServer: public THttpServer::ICallBack {
@@ -737,5 +738,200 @@ Y_UNIT_TEST_SUITE(THttpServerTest) {
                 }
             }
         }
+    }
+
+    class TShooter {
+    public:
+        struct TCounters {
+        public:
+            TCounters() = default;
+            TCounters(const TCounters& other)
+                : Fail(other.Fail.load())
+                , Success(other.Success.load())
+            {
+            }
+        public:
+            std::atomic<size_t> Fail = 0;
+            std::atomic<size_t> Success = 0;
+        };
+    public:
+        TShooter(size_t threadCount, ui16 port)
+            : Counters_(threadCount)
+        {
+            for (size_t i = 0; i < threadCount; ++i) {
+                auto func = [i, port, this] () {
+                    for (;;) {
+                        try {
+                            TTestRequest r(port);
+                            r.KeepAliveConnection = true;
+                            for (size_t j = 0; j < 100; ++j) {
+                                if (Stopped_.load()) {
+                                    return;
+                                }
+                                r.Execute();
+                                Sleep(TDuration::MilliSeconds(1) * RandomNumber<float>());
+                                Counters_[i].Success++;
+                            }
+                        } catch (TSystemError& e) {
+                            UNIT_ASSERT_C(e.Status() == ECONNRESET || e.Status() == ECONNREFUSED, CurrentExceptionMessage());
+                            Counters_[i].Fail++;
+                        } catch (THttpReadException&) {
+                            Counters_[i].Fail++;
+                        } catch (...) {
+                            UNIT_ASSERT_C(false, CurrentExceptionMessage());
+                        }
+                    }
+                };
+
+                Threads_.push_back(SystemThreadFactory()->Run(func));
+            }
+        }
+
+        void Stop() {
+            Stopped_.store(true);
+            for (auto& thread : Threads_) {
+                thread->Join();
+            }
+        }
+
+        void WaitProgress() const {
+            auto snapshot = Counters_;
+            for (;;) {
+                size_t haveProgress = 0;
+                for (size_t i = 0; i < Counters_.size(); ++i) {
+                    haveProgress += (Counters_[i].Fail.load() + Counters_[i].Success.load()) > (snapshot[i].Fail + snapshot[i].Success);
+                }
+
+                if (haveProgress == Counters_.size()) {
+                    return;
+                }
+                Sleep(TDuration::MilliSeconds(1));
+            }
+        }
+
+        const auto& GetCounters() const {
+            return Counters_;
+        }
+
+        ~TShooter() {
+            Stop();
+        }
+    private:
+        TVector<THolder<IThreadFactory::IThread>> Threads_;
+        std::atomic<bool> Stopped_ = false;
+        TVector<TCounters> Counters_;
+    };
+
+    Y_UNIT_TEST(TestStartStop) {
+        TPortManager pm;
+        const ui16 port = pm.GetPort();
+
+        const size_t threadCount = 5;
+        TShooter shooter(threadCount, port);
+
+        TString res = TestData();
+        for (bool oneShot : {true, false}) {
+            TEchoServer serverImpl(res);
+            THttpServer server(&serverImpl, THttpServer::TOptions(port).EnableKeepAlive(true).SetOneShotPoll(oneShot));
+            for (size_t i = 0; i < 100; ++i) {
+                UNIT_ASSERT(server.Start());
+                shooter.WaitProgress();
+
+                {
+                    auto before = shooter.GetCounters();
+                    shooter.WaitProgress();
+                    auto after = shooter.GetCounters();
+                    for (size_t i = 0; i < before.size(); ++i) {
+                        UNIT_ASSERT(before[i].Success < after[i].Success);
+                        UNIT_ASSERT(before[i].Fail == after[i].Fail);
+                    }
+                }
+
+                server.Stop();
+                shooter.WaitProgress();
+                {
+                    auto before = shooter.GetCounters();
+                    shooter.WaitProgress();
+                    auto after = shooter.GetCounters();
+                    for (size_t i = 0; i < before.size(); ++i) {
+                        UNIT_ASSERT(before[i].Success == after[i].Success);
+                        UNIT_ASSERT(before[i].Fail < after[i].Fail);
+                    }
+                }
+            }
+        }
+    }
+
+    Y_UNIT_TEST(TestMaxConnections) {
+        class TMaxConnServer
+            : public TEchoServer
+        {
+        public:
+            using TEchoServer::TEchoServer;
+
+            void OnMaxConn() override {
+                ++MaxConns;
+            }
+        public:
+            std::atomic<size_t> MaxConns = 0;
+
+        };
+
+        TPortManager pm;
+        const ui16 port = pm.GetPort();
+
+        const size_t maxConnections = 5;
+
+        TString res = TestData();
+
+        for (bool oneShot : {true, false}) {
+            TMaxConnServer serverImpl(res);
+            THttpServer server(&serverImpl, THttpServer::TOptions(port).EnableKeepAlive(true).SetMaxConnections(maxConnections).SetOneShotPoll(oneShot));
+
+            UNIT_ASSERT(server.Start());
+
+            TShooter shooter(maxConnections + 1, port);
+
+            for (size_t i = 0; i < 100; ++i) {
+                const size_t prev = serverImpl.MaxConns.load();
+                while (serverImpl.MaxConns.load() < prev + 100) {
+                    Sleep(TDuration::MilliSeconds(1));
+                }
+            }
+
+            shooter.Stop();
+            server.Stop();
+
+            for (const auto& c : shooter.GetCounters()) {
+                UNIT_ASSERT(c.Success > 0);
+                UNIT_ASSERT(c.Fail > 0);
+                UNIT_ASSERT(c.Success > c.Fail);
+            }
+        }
+    }
+
+    Y_UNIT_TEST(StartFail) {
+        TString res = TestData();
+        TEchoServer serverImpl(res);
+        {
+            THttpServer server(&serverImpl, THttpServer::TOptions(1));
+
+            UNIT_ASSERT(!server.GetErrorCode());
+            UNIT_ASSERT(!server.Start());
+            UNIT_ASSERT(server.GetErrorCode());
+        }
+
+        {
+            TPortManager pm;
+            const ui16 port = pm.GetPort();
+            THttpServer server1(&serverImpl, THttpServer::TOptions(port));
+            UNIT_ASSERT(server1.Start());
+            UNIT_ASSERT(!server1.GetErrorCode());
+
+            THttpServer server2(&serverImpl, THttpServer::TOptions(port));
+            UNIT_ASSERT(!server2.Start());
+            UNIT_ASSERT(server2.GetErrorCode());
+        }
+
     }
 }

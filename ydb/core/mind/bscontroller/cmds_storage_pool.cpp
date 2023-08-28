@@ -676,7 +676,7 @@ namespace NKikimr::NBsController {
         }
     }
 
-    void TBlobStorageController::TConfigState::ExecuteStep(const NKikimrBlobStorage::TPutVDiskToReadOnly& cmd, TStatus& /*status*/) {
+    void TBlobStorageController::TConfigState::ExecuteStep(const NKikimrBlobStorage::TSetVDiskReadOnly& cmd, TStatus& /*status*/) {
         // first, find matching vslot
         const TVSlotId& vslotId = cmd.GetVSlotId();
         TVSlotInfo *vslot = VSlots.FindForUpdate(vslotId);
@@ -690,10 +690,22 @@ namespace NKikimr::NBsController {
             throw TExVDiskIdIncorrect(vdiskId, vslotId);
         }
 
+        // then validate transition direction
+        const TMood::EValue currentMood = static_cast<TMood::EValue>(vslot->Mood);
+        const TMood::EValue targetMood = cmd.GetValue() ? TMood::ReadOnly : TMood::Normal;
+        bool allowedTransition = (
+            (currentMood == TMood::Normal && targetMood == TMood::ReadOnly) ||
+            (currentMood == TMood::ReadOnly && targetMood == TMood::Normal)
+        );
+        if (!allowedTransition) {
+            throw TExError() << "unable to transition VDisk" <<
+                " from " << TMood::Name(currentMood) <<
+                " to " << TMood::Name(targetMood);
+        }
+
         TGroupInfo *group = Groups.FindForUpdate(vslot->GroupId);
-        vslot->Mood = TMood::ReadOnly;
+        vslot->Mood = targetMood;
         vslot->Status = NKikimrBlobStorage::EVDiskStatus::INIT_PENDING;
-        vslot->DropFromVSlotReadyTimestampQ();
         vslot->IsReady = false;
         GroupFailureModelChanged.insert(group->ID);
         group->CalculateGroupStatus();

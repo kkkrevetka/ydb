@@ -539,6 +539,21 @@ void TLogReader::Exec(ui64 offsetRead, TVector<ui64> &badOffsets, TActorSystem *
     }// while (true)
 }
 
+void TLogReader::NotifyError(ui64 offsetRead, TString& errorReason) {
+    TGuard<TMutex> guard(ExecMutex);
+    if (IsReplied.load()) {
+        return;
+    }
+
+    Result->ErrorReason = errorReason;
+
+    LOG_ERROR(*ActorSystem, NKikimrServices::BS_PDISK,
+        "PDiskId# %" PRIu32 " Error reading log with offset %" PRIu64,
+        (ui32)PDisk->PDiskId, offsetRead);
+        
+    ReplyError();
+}
+
 TString TLogReader::SelfInfo() {
     TStringStream ss;
     ss << "PDiskId# " << PDisk->PDiskId
@@ -1148,22 +1163,13 @@ void TLogReader::Reply() {
         PDisk->ProcessChunkOwnerMap(*ChunkOwnerMap.Get());
         ChunkOwnerMap.Destroy();
 
-        // Remove invalid part of the last log chunk.
         PDisk->BlockDevice->EraseCacheRange(
-            PDisk->Format.Offset(ChunkIdx, SectorIdx) + OffsetInSector,
+            PDisk->Format.Offset(ChunkIdx, 0),
             PDisk->Format.Offset(ChunkIdx + 1, 0)
         );
     }
     LOG_DEBUG(*PDisk->ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32 " To ownerId# %" PRIu32 " %s",
         (ui32)PDisk->PDiskId, (ui32)Owner, Result->ToString().c_str());
-    
-    if (!IsInitial && Result->IsEndOfLog) {
-        ui32 prevChunkIdx = ChunkIdx;
-
-        // Finished reading owner's whole log.
-        PDisk->NotifyLogChunkRead(prevChunkIdx, Owner);
-    }
-
     ActorSystem->Send(ReplyTo, Result.Release());
     if (!IsInitial) {
         PDisk->Mon.LogRead.CountResponse(ResultSize);
@@ -1305,13 +1311,6 @@ void TLogReader::UpdateNewChunkInfo(ui32 currChunk, const TMaybe<ui32> prevChunk
 }
 
 void TLogReader::SwitchToChunk(ui32 chunkIdx) {
-    if (!IsInitial) {
-        ui32 prevChunkIdx = ChunkIdx;
-        
-        // Finished reading log chunk.
-        PDisk->NotifyLogChunkRead(prevChunkIdx, Owner);
-    }
-
     ChunkIdx = chunkIdx;
     SectorIdx = 0;
     OffsetInSector = 0;
