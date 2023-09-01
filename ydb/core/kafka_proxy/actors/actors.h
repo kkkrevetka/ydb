@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ydb/core/persqueue/pq_rl_helpers.h>
 #include <ydb/core/protos/config.pb.h>
 #include <ydb/library/aclib/aclib.h>
 
@@ -29,9 +30,14 @@ struct TContext {
     EAuthSteps AuthenticationStep = EAuthSteps::WAIT_HANDSHAKE;
     TString SaslMechanism;
 
-    TString Database;
+    TString DatabasePath;
+    TString FolderId;
+    TString CloudId;
+    TString DatabaseId;
     TIntrusiveConstPtr<NACLib::TUserToken> UserToken;
     TString ClientDC;
+
+    NKikimr::NPQ::TRlContext RlContext;
 
     bool Authenticated() { return AuthenticationStep == SUCCESS; }
 };

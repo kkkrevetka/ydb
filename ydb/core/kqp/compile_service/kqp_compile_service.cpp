@@ -307,20 +307,21 @@ public:
         return NKikimrServices::TActivity::KQP_COMPILE_SERVICE;
     }
 
-    TKqpCompileService(const TTableServiceConfig& serviceConfig, const TKqpSettings::TConstPtr& kqpSettings,
+    TKqpCompileService(const TTableServiceConfig& serviceConfig,
+        const NKikimrConfig::TMetadataProviderConfig& metadataProviderConfig, const TKqpSettings::TConstPtr& kqpSettings,
         TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters,
         std::shared_ptr<IQueryReplayBackendFactory> queryReplayFactory,
-        NYql::ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory,
-        NYql::IHTTPGateway::TPtr httpGateway)
+        std::optional<TKqpFederatedQuerySetup> federatedQuerySetup
+        )
         : Config(serviceConfig)
+        , MetadataProviderConfig(metadataProviderConfig)
         , KqpSettings(kqpSettings)
         , ModuleResolverState(moduleResolverState)
         , Counters(counters)
         , QueryCache(Config.GetCompileQueryCacheSize(), TDuration::Seconds(Config.GetCompileQueryCacheTTLSec()))
         , RequestsQueue(Config.GetCompileRequestQueueSize())
         , QueryReplayFactory(std::move(queryReplayFactory))
-        , CredentialsFactory(std::move(credentialsFactory))
-        , HttpGateway(std::move(httpGateway))
+        , FederatedQuerySetup(federatedQuerySetup)
     {}
 
     void Bootstrap(const TActorContext& ctx) {
@@ -737,8 +738,9 @@ private:
     }
 
     void StartCompilation(TKqpCompileRequest&& request, const TActorContext& ctx) {
-        auto compileActor = CreateKqpCompileActor(ctx.SelfID, KqpSettings, Config, HttpGateway, ModuleResolverState, Counters,
-            CredentialsFactory, request.Uid, request.Query, request.UserToken, request.DbCounters, request.CompileServiceSpan.GetTraceId(), std::move(request.TempTablesState));
+        auto compileActor = CreateKqpCompileActor(ctx.SelfID, KqpSettings, Config, MetadataProviderConfig, ModuleResolverState, Counters, 
+             request.Uid, request.Query, request.UserToken, FederatedQuerySetup, request.DbCounters, request.CompileServiceSpan.GetTraceId(),
+             std::move(request.TempTablesState));
         auto compileActorId = ctx.ExecutorThread.RegisterActor(compileActor, TMailboxType::HTSwap,
             AppData(ctx)->UserPoolId);
 
@@ -817,6 +819,7 @@ private:
 
 private:
     TTableServiceConfig Config;
+    NKikimrConfig::TMetadataProviderConfig MetadataProviderConfig;
     TKqpSettings::TConstPtr KqpSettings;
     TIntrusivePtr<TModuleResolverState> ModuleResolverState;
     TIntrusivePtr<TKqpCounters> Counters;
@@ -825,18 +828,18 @@ private:
     TKqpQueryCache QueryCache;
     TKqpRequestsQueue RequestsQueue;
     std::shared_ptr<IQueryReplayBackendFactory> QueryReplayFactory;
-    NYql::ISecuredServiceAccountCredentialsFactory::TPtr CredentialsFactory;
-    NYql::IHTTPGateway::TPtr HttpGateway;
+    std::optional<TKqpFederatedQuerySetup> FederatedQuerySetup;
 };
 
-IActor* CreateKqpCompileService(const TTableServiceConfig& serviceConfig, const TKqpSettings::TConstPtr& kqpSettings,
+IActor* CreateKqpCompileService(const TTableServiceConfig& serviceConfig,
+    const NKikimrConfig::TMetadataProviderConfig& metadataProviderConfig, const TKqpSettings::TConstPtr& kqpSettings,
     TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters,
     std::shared_ptr<IQueryReplayBackendFactory> queryReplayFactory,
-    NYql::ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory,
-    NYql::IHTTPGateway::TPtr httpGateway)
+    std::optional<TKqpFederatedQuerySetup> federatedQuerySetup
+    )
 {
-    return new TKqpCompileService(serviceConfig, kqpSettings, moduleResolverState, counters,
-            std::move(queryReplayFactory), std::move(credentialsFactory), std::move(httpGateway));
+    return new TKqpCompileService(serviceConfig, metadataProviderConfig, kqpSettings, moduleResolverState, counters,
+                                  std::move(queryReplayFactory), federatedQuerySetup);
 }
 
 } // namespace NKqp

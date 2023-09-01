@@ -93,7 +93,19 @@ bool IsArgumentsOnlyLambda(const TExprNode& lambda, TVector<ui32>& argIndices) {
     return true;
 }
 
-TExprNode::TPtr RebuildArgumentsOnlyLambdaForBlocks(const TExprNode& lambda, TExprContext& ctx) {
+TExprNode::TPtr RebuildArgumentsOnlyLambdaForBlocks(const TExprNode& lambda, TExprContext& ctx, TTypeAnnotationContext& types) {
+    TVector<const TTypeAnnotationNode*> argTypes;
+    for (auto arg : lambda.Head().ChildrenList()) {
+        argTypes.emplace_back(arg->GetTypeAnn());
+    }
+
+    YQL_ENSURE(types.ArrowResolver);
+    auto resolveStatus = types.ArrowResolver->AreTypesSupported(ctx.GetPosition(lambda.Pos()), argTypes, ctx);
+    YQL_ENSURE(resolveStatus != IArrowResolver::ERROR);
+    if (resolveStatus != IArrowResolver::OK) {
+        return {};
+    }
+
     TVector<ui32> argIndicies;
     if (!IsArgumentsOnlyLambda(lambda, argIndicies)) {
         return {};
@@ -123,7 +135,7 @@ TExprNode::TPtr OptimizeWideToBlocks(const TExprNode::TPtr& node, TExprContext& 
     if (node->Head().IsCallable("WideMap")) {
         // swap if all outputs are arguments
         const auto& lambda = node->Head().Tail();
-        if (auto newLambda = RebuildArgumentsOnlyLambdaForBlocks(lambda, ctx)) {
+        if (auto newLambda = RebuildArgumentsOnlyLambdaForBlocks(lambda, ctx, types)) {
             YQL_CLOG(DEBUG, Core) << "Swap " << node->Head().Content() << " with " << node->Content();
             return ctx.Builder(node->Pos())
                 .Callable("WideMap")
@@ -4989,6 +5001,10 @@ bool CollectBlockRewrites(const TMultiExprType* multiInputType, bool keepInputCo
         std::string_view arrowFunctionName;
         if (node->IsList() || node->IsCallable({"And", "Or", "Xor", "Not", "Coalesce", "If", "Just", "Nth", "ToPg", "FromPg", "PgResolvedCall", "PgResolvedOp"}))
         {
+            if (node->IsCallable() && !IsSupportedAsBlockType(node->Pos(), *node->GetTypeAnn(), ctx, types)) {
+                return true;
+            }
+
             ui32 startIndex = 0;
             if (node->IsCallable("PgResolvedCall")) {
                 if (node->GetTypeAnn()->GetKind() != ETypeAnnotationKind::Pg) {
@@ -5013,7 +5029,7 @@ bool CollectBlockRewrites(const TMultiExprType* multiInputType, bool keepInputCo
                 auto child = node->ChildPtr(index);
                 if (!child->GetTypeAnn()->IsComputable()) {
                     funcArgs.push_back(child);
-                } else  if (child->IsComplete()) {
+                } else if (child->IsComplete() && IsSupportedAsBlockType(child->Pos(), *child->GetTypeAnn(), ctx, types)) {
                     funcArgs.push_back(ctx.NewCallable(node->Pos(), "AsScalar", { child }));
                 } else if (auto rit = rewrites.find(child.Get()); rit != rewrites.end()) {
                     funcArgs.push_back(rit->second);
@@ -5212,7 +5228,7 @@ bool CollectBlockRewrites(const TMultiExprType* multiInputType, bool keepInputCo
 TExprNode::TPtr OptimizeWideMapBlocks(const TExprNode::TPtr& node, TExprContext& ctx, TTypeAnnotationContext& types) {
     const auto lambda = node->TailPtr();
     if (node->Head().IsCallable("WideFromBlocks")) {
-        if (auto newLambda = RebuildArgumentsOnlyLambdaForBlocks(*lambda, ctx)) {
+        if (auto newLambda = RebuildArgumentsOnlyLambdaForBlocks(*lambda, ctx, types)) {
             YQL_CLOG(DEBUG, Core) << "Swap " << node->Head().Content() << " with " << node->Content();
             return ctx.Builder(node->Pos())
                 .Callable("WideFromBlocks")
@@ -5670,46 +5686,56 @@ TExprNode::TPtr ExpandConstraintsOf(const TExprNode::TPtr& node, TExprContext& c
 TExprNode::TPtr ExpandCostsOf(const TExprNode::TPtr& node, TExprContext& ctx, TTypeAnnotationContext& typesCtx) {
     YQL_CLOG(DEBUG, CorePeepHole) << "Expand " << node->Content();
 
-    TString json;
-    TStringOutput out(json);
-    NJson::TJsonWriter jsonWriter(&out, true);
+    TNodeMap<TString> visitedNodes;
+    std::function<TString(const TExprNode::TPtr& node)> printNode = [&](const TExprNode::TPtr& node) -> TString {
+        auto [it, emplaced] = visitedNodes.emplace(node.Get(), "");
+        if (!emplaced) {
+            return it->second;
+        }
 
-    VisitExpr(node, [&](const TExprNode::TPtr& node) {
-        auto stat = typesCtx.GetStats(node.Get());
-
-        if (stat || node->ChildrenSize()) {
-            jsonWriter.OpenMap();
-            jsonWriter.WriteKey("Name");
-            jsonWriter.Write(node->Content());
-            if (stat) {
-                if (stat->Cost) {
-                    jsonWriter.WriteKey("Cost");
-                    jsonWriter.Write(*stat->Cost);
-                }
-                jsonWriter.WriteKey("Cols");
-                jsonWriter.Write(stat->Ncols);
-                jsonWriter.WriteKey("Rows");
-                jsonWriter.Write(stat->Nrows);
-            }
-            if (node->ChildrenSize()) {
-                jsonWriter.WriteKey("Children");
-                jsonWriter.OpenArray();
+        std::vector<TString> chInfo;
+        for (const auto& child : node->ChildrenList()) {
+            auto res = printNode(child);
+            if (res) {
+                chInfo.emplace_back(std::move(res));
             }
         }
-        return true;
-    }, [&](const TExprNode::TPtr& node) {
-        auto stat = typesCtx.GetStats(node.Get());
 
-        if (stat || node->ChildrenSize()) {
-            if (node->ChildrenSize()) {
+        auto stat = typesCtx.GetStats(node.Get());
+        if (!chInfo.empty() || stat) {
+            TStringOutput out(it->second);
+            NJson::TJsonWriter jsonWriter(&out, false);
+            jsonWriter.OpenMap();
+            if (node->Content()) {
+                jsonWriter.Write("Name", node->Content());
+            }
+            if (stat) {
+                if (stat->Cost) {
+                    jsonWriter.Write("Cost", *stat->Cost);
+                }
+                jsonWriter.Write("Cols", stat->Ncols);
+                jsonWriter.Write("Rows", stat->Nrows);
+            }
+            if (!chInfo.empty()) {
+                jsonWriter.WriteKey("Children");
+                jsonWriter.OpenArray();
+                for (const auto& info : chInfo) {
+                    jsonWriter.UnsafeWrite(info);
+                }
                 jsonWriter.CloseArray();
             }
             jsonWriter.CloseMap();
+            jsonWriter.Flush();
         }
-        return true;
-    });
 
-    jsonWriter.Flush();
+        return it->second;
+    };
+
+    TString json = printNode(node);
+
+    if (!json) {
+        json = "{}";
+    }
 
     return ctx.Builder(node->Pos())
         .Callable("Json")

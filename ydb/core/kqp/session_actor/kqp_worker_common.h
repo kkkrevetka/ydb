@@ -8,8 +8,6 @@
 #include <ydb/core/kqp/provider/yql_kikimr_provider.h>
 #include <ydb/core/kqp/provider/yql_kikimr_settings.h>
 #include <ydb/core/protos/kqp.pb.h>
-#include <ydb/library/yql/providers/common/http_gateway/yql_http_gateway.h>
-#include <ydb/library/yql/providers/common/token_accessor/client/factory.h>
 
 #include <library/cpp/actors/core/actor.h>
 #include <library/cpp/actors/core/log.h>
@@ -89,7 +87,7 @@ inline TIntrusivePtr<NYql::TKikimrConfiguration> CreateConfig(const TKqpSettings
         cfg->_KqpTablePathPrefix = workerSettings.Database;
     }
 
-    ApplyServiceConfig(*cfg, workerSettings.Service);
+    ApplyServiceConfig(*cfg, workerSettings.TableService);
 
     cfg->FreezeDefaults();
     return cfg;
@@ -147,8 +145,11 @@ bool HasSchemeOrFatalIssues(const NYql::TIssues& issues);
 
 IActor* CreateKqpWorkerActor(const TActorId& owner, const TString& sessionId,
     const TKqpSettings::TConstPtr& kqpSettings, const TKqpWorkerSettings& workerSettings,
-    NYql::IHTTPGateway::TPtr httpGateway, TIntrusivePtr<TModuleResolverState> moduleResolverState,
-    TIntrusivePtr<TKqpCounters> counters, NYql::ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory);
+    std::optional<TKqpFederatedQuerySetup> federatedQuerySetup,
+    TIntrusivePtr<TModuleResolverState> moduleResolverState,
+    TIntrusivePtr<TKqpCounters> counters,
+    const NKikimrConfig::TMetadataProviderConfig& metadataProviderConfig
+    );
 
 bool IsSameProtoType(const NKikimrMiniKQL::TType& actual, const NKikimrMiniKQL::TType& expected);
 

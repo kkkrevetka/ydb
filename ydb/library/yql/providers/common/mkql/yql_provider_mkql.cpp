@@ -5,6 +5,8 @@
 #include <ydb/library/yql/core/yql_expr_type_annotation.h>
 #include <ydb/library/yql/core/expr_nodes/yql_expr_nodes.h>
 #include <ydb/library/yql/core/yql_expr_type_annotation.h>
+#include <ydb/library/yql/core/yql_match_recognize.h>
+
 #include <ydb/library/yql/core/yql_join.h>
 #include <ydb/library/yql/core/yql_opt_utils.h>
 
@@ -850,6 +852,66 @@ TMkqlCommonCallableCompiler::TShared::TShared() {
         const auto tupleObj = MkqlBuildExpr(node.Head(), ctx);
         const auto index = FromString<ui32>(node.Tail().Content());
         return ctx.ProgramBuilder.Nth(tupleObj, index);
+    });
+
+    AddCallable("MatchRecognizeCore", [](const TExprNode& node, TMkqlBuildContext& ctx) {
+        const auto& inputStream = node.Child(0);
+        const auto& partitionKeySelector = node.Child(1);
+        const auto& partitionColumns = node.Child(2);
+        const auto& params = node.Child(3);
+
+        //explore params
+        const auto& measures = params->ChildRef(0);
+        const auto& pattern = params->ChildRef(3);
+        const auto& defines = params->ChildRef(4);
+
+        //explore measures
+        const auto measureNames = measures->ChildRef(2);
+        constexpr size_t FirstMeasureLambdaIndex = 3;
+
+        //explore defines
+        const auto defineNames = defines->ChildRef(2);
+        const size_t FirstDefineLambdaIndex = 3;
+
+        TVector<TStringBuf> partitionColumnNames;
+        for (const auto& n: partitionColumns->Children()) {
+            partitionColumnNames.push_back(n->Content());
+        }
+
+        TProgramBuilder::TUnaryLambda getPartitionKeySelector = [partitionKeySelector, &ctx](TRuntimeNode inputRowArg){
+            return MkqlBuildLambda(*partitionKeySelector, ctx, {inputRowArg});
+        };
+
+        TVector<std::pair<TStringBuf, TProgramBuilder::TTernaryLambda>> getDefines(defineNames->ChildrenSize());
+        for (size_t i = 0; i != defineNames->ChildrenSize(); ++i) {
+            getDefines[i] = std::pair{
+                    defineNames->ChildRef(i)->Content(),
+                    [i, defines, &ctx](TRuntimeNode data, TRuntimeNode matchedVars, TRuntimeNode rowIndex) {
+                        return MkqlBuildLambda(*defines->ChildRef(FirstDefineLambdaIndex + i), ctx,
+                                               {data, matchedVars, rowIndex});
+                    }
+            };
+        }
+
+        TVector<std::pair<TStringBuf, TProgramBuilder::TBinaryLambda>> getMeasures(measureNames->ChildrenSize());
+        for (size_t i = 0; i != measureNames->ChildrenSize(); ++i) {
+            getMeasures[i] = std::pair{
+                    measureNames->ChildRef(i)->Content(),
+                    [i, measures, &ctx](TRuntimeNode data, TRuntimeNode matchedVars) {
+                        return MkqlBuildLambda(*measures->ChildRef(FirstMeasureLambdaIndex + i), ctx,
+                                               {data, matchedVars});
+                    }
+            };
+        }
+
+        return ctx.ProgramBuilder.MatchRecognizeCore(
+                MkqlBuildExpr(*inputStream, ctx),
+                getPartitionKeySelector,
+                partitionColumnNames,
+                getMeasures,
+                NYql::NMatchRecognize::ConvertPattern(pattern, ctx.ExprCtx),
+                getDefines
+                );
     });
 
     AddCallable("Guess", [](const TExprNode& node, TMkqlBuildContext& ctx) {

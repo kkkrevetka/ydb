@@ -7,6 +7,7 @@
 #include "ydb/library/yql/minikql/mkql_function_registry.h"
 #include "ydb/library/yql/minikql/mkql_utils.h"
 #include "ydb/library/yql/minikql/mkql_type_builder.h"
+#include "ydb/library/yql/core/sql_types/match_recognize.h"
 
 #include <util/string/cast.h>
 #include <util/string/printf.h>
@@ -5788,6 +5789,194 @@ TRuntimeNode TProgramBuilder::ScalarApply(const TArrayRef<const TRuntimeNode>& a
 
     builder.Add(ret);
     return TRuntimeNode(builder.Build(), false);
+}
+
+namespace {
+using namespace NYql::NMatchRecognize;
+TRuntimeNode PatternToRuntimeNode(const TRowPattern& pattern, const TProgramBuilder& programBuilder) {
+    const auto& env = programBuilder.GetTypeEnvironment();
+    TTupleLiteralBuilder patternBuilder(env);
+    for (const auto& term: pattern) {
+        TTupleLiteralBuilder termBuilder(env);
+        for (const auto& factor: term) {
+            TStructLiteralBuilder factorBuilder(env);
+            factorBuilder.Add("Primary", factor.Primary.index() == 0 ?
+                programBuilder.NewDataLiteral<NUdf::EDataSlot::String>(std::get<0>(factor.Primary)) :
+                PatternToRuntimeNode(std::get<1>(factor.Primary), programBuilder)
+            );
+            factorBuilder.Add("QuantityMin", programBuilder.NewDataLiteral<ui64>(factor.QuantityMin));
+            factorBuilder.Add("QuantityMax", programBuilder.NewDataLiteral<ui64>(factor.QuantityMax));
+            factorBuilder.Add("Greedy", programBuilder.NewDataLiteral<bool>(factor.Greedy));
+            factorBuilder.Add("Output", programBuilder.NewDataLiteral<bool>(factor.Output));
+            termBuilder.Add({factorBuilder.Build(), true});
+        }
+        patternBuilder.Add({termBuilder.Build(), true});
+    }
+    return {patternBuilder.Build(), true};
+};
+
+} //namespace
+
+TRuntimeNode TProgramBuilder::MatchRecognizeCore(
+    TRuntimeNode inputStream,
+    const TUnaryLambda& getPartitionKeySelectorNode,
+    const TArrayRef<TStringBuf>& partitionColumns,
+    const TArrayRef<std::pair<TStringBuf, TBinaryLambda>>& getMeasures,
+    const NYql::NMatchRecognize::TRowPattern& pattern,
+    const TArrayRef<std::pair<TStringBuf, TTernaryLambda>>& getDefines
+) {
+    MKQL_ENSURE(RuntimeVersion >= 42, "MatchRecognize is not supported in runtime version " << RuntimeVersion);
+
+    const auto inputRowType = AS_TYPE(TStructType, AS_TYPE(TFlowType, inputStream.GetStaticType())->GetItemType());
+    const auto inputRowArg = Arg(inputRowType);
+    const auto partitionKeySelectorNode = getPartitionKeySelectorNode(inputRowArg);
+
+    TStructTypeBuilder indexRangeTypeBuilder(Env);
+    indexRangeTypeBuilder.Add("From", TDataType::Create(NUdf::TDataType<ui64>::Id, Env));
+    indexRangeTypeBuilder.Add("To", TDataType::Create(NUdf::TDataType<ui64>::Id, Env));
+    const auto& rangeList = TListType::Create(indexRangeTypeBuilder.Build(), Env);
+    TStructTypeBuilder matchedVarsTypeBuilder(Env);
+    for (const auto& var: GetPatternVars(pattern)) {
+        matchedVarsTypeBuilder.Add(var, rangeList);
+    }
+    TRuntimeNode matchedVarsArg = Arg(matchedVarsTypeBuilder.Build());
+
+    //---These vars may be empty in case of no measures
+    TRuntimeNode measureInputDataArg;
+    std::vector<TRuntimeNode> specialColumnIndexesInMeasureInputDataRow;
+    TVector<TRuntimeNode> measures;
+    TVector<TType*> measureTypes;
+    //---
+    if (getMeasures.empty()) {
+        measureInputDataArg = Arg(Env.GetTypeOfVoid());
+    } else {
+        using NYql::NMatchRecognize::MeasureInputDataSpecialColumns;
+        measures.reserve(getMeasures.size());
+        measureTypes.reserve(getMeasures.size());
+        specialColumnIndexesInMeasureInputDataRow.resize(static_cast<size_t>(NYql::NMatchRecognize::MeasureInputDataSpecialColumns::Last));
+        TStructTypeBuilder measureInputDataRowTypeBuilder(Env);
+        for (ui32 i = 0; i != inputRowType->GetMembersCount(); ++i) {
+            measureInputDataRowTypeBuilder.Add(inputRowType->GetMemberName(i), inputRowType->GetMemberType(i));
+        }
+        measureInputDataRowTypeBuilder.Add(
+                MeasureInputDataSpecialColumnName(MeasureInputDataSpecialColumns::Classifier),
+                TDataType::Create(NUdf::TDataType<NYql::NUdf::TUtf8>::Id, Env)
+        );
+        measureInputDataRowTypeBuilder.Add(
+                MeasureInputDataSpecialColumnName(MeasureInputDataSpecialColumns::MatchNumber),
+                TDataType::Create(NUdf::TDataType<ui64>::Id, Env)
+        );
+        const auto measureInputDataRowType = measureInputDataRowTypeBuilder.Build();
+
+        for (ui32 i = 0; i != measureInputDataRowType->GetMembersCount(); ++i) {
+            //assume a few, if grows, it's better to use a lookup table here
+            static_assert(static_cast<size_t>(MeasureInputDataSpecialColumns::Last) < 5);
+            for (size_t j = 0; j != static_cast<size_t>(MeasureInputDataSpecialColumns::Last); ++j) {
+                if (measureInputDataRowType->GetMemberName(i) ==
+                        NYql::NMatchRecognize::MeasureInputDataSpecialColumnName(static_cast<MeasureInputDataSpecialColumns>(j)))
+                    specialColumnIndexesInMeasureInputDataRow[j] = NewDataLiteral<ui32>(i);
+            }
+        }
+
+        measureInputDataArg = Arg(TListType::Create(measureInputDataRowType, Env));
+        for (size_t i = 0; i != getMeasures.size(); ++i) {
+            measures.push_back(getMeasures[i].second(measureInputDataArg, matchedVarsArg));
+            measureTypes.push_back(measures[i].GetStaticType());
+        }
+    }
+
+    TStructTypeBuilder outputRowTypeBuilder(Env);
+    THashMap<TStringBuf, size_t> partitionColumnLookup;
+    for (size_t i = 0; i != partitionColumns.size(); ++i) {
+        const auto& name = partitionColumns[i];
+        partitionColumnLookup[name] = i;
+        outputRowTypeBuilder.Add(
+                name,
+                AS_TYPE(TTupleType, partitionKeySelectorNode.GetStaticType())->GetElementType(i)
+        );
+    }
+    THashMap<TStringBuf, size_t> measureColumnLookup;
+    for (size_t i = 0; i != measures.size(); ++i) {
+        const auto& name = getMeasures[i].first;
+        measureColumnLookup[name] = i;
+        outputRowTypeBuilder.Add(
+                name,
+                measures[i].GetStaticType()
+        );
+    }
+    auto outputRowType = outputRowTypeBuilder.Build();
+
+    std::vector<TRuntimeNode> partitionColumnIndexes(partitionColumnLookup.size());
+    std::vector<TRuntimeNode> measureColumnIndexes(measureColumnLookup.size());
+    for (ui32 i = 0; i != outputRowType->GetMembersCount(); ++i) {
+        if (auto it = partitionColumnLookup.find(outputRowType->GetMemberName(i)); it != partitionColumnLookup.end()) {
+            partitionColumnIndexes[it->second] = NewDataLiteral<ui32>(i);
+        }
+        else if (auto it = measureColumnLookup.find(outputRowType->GetMemberName(i)); it != measureColumnLookup.end()) {
+            measureColumnIndexes[it->second] = NewDataLiteral<ui32>(i);
+        }
+    }
+    auto outputType = (TType*)TFlowType::Create(outputRowType, Env);
+
+    THashMap<TStringBuf , size_t> patternVarLookup;
+    for (ui32 i = 0; i != AS_TYPE(TStructType, matchedVarsArg.GetStaticType())->GetMembersCount(); ++i){
+        patternVarLookup[AS_TYPE(TStructType, matchedVarsArg.GetStaticType())->GetMemberName(i)] = i;
+    }
+
+    THashMap<TStringBuf , size_t> defineLookup;
+    for (size_t i = 0; i != getDefines.size(); ++i) {
+        defineLookup[getDefines[i].first] = i;
+    }
+    std::vector<TRuntimeNode> defineNames(patternVarLookup.size());
+    std::vector<TRuntimeNode> defineNodes(patternVarLookup.size());
+
+    const auto& defineInputDataArg = Arg(TListType::Create(inputRowType, Env));
+    const auto& currentRowIndexArg = Arg(TDataType::Create(NUdf::TDataType<ui64>::Id, Env));
+    for (const auto& [v, i]: patternVarLookup) {
+        defineNames[i] = NewDataLiteral<NUdf::EDataSlot::String>(v);
+        if (const auto it = defineLookup.find(v); it != defineLookup.end()) {
+            defineNodes[i] = getDefines[it->second].second(defineInputDataArg, matchedVarsArg, currentRowIndexArg);
+        }
+        else { //no predicate for var
+            if ("$" == v || "^" == v) {
+                //DO nothing, //will be handled in a specific way
+            }
+            else { // a var without a predicate matches any row
+                defineNodes[i] = NewDataLiteral<bool>(true);
+            }
+        }
+    }
+
+    TCallableBuilder callableBuilder(GetTypeEnvironment(), "MatchRecognizeCore", outputType);
+    auto indexType = TDataType::Create(NUdf::TDataType<ui32>::Id, Env);
+    auto indexListType = TListType::Create(indexType, Env);
+    callableBuilder.Add(inputStream);
+    callableBuilder.Add(inputRowArg);
+    callableBuilder.Add(partitionKeySelectorNode);
+    callableBuilder.Add(TRuntimeNode(TListLiteral::Create(partitionColumnIndexes.data(), partitionColumnIndexes.size(), indexListType, Env), true));
+    callableBuilder.Add(measureInputDataArg);
+    callableBuilder.Add(TRuntimeNode(TListLiteral::Create(
+            specialColumnIndexesInMeasureInputDataRow.data(), specialColumnIndexesInMeasureInputDataRow.size(),
+            indexListType, Env
+            ),
+    true));
+    callableBuilder.Add(NewDataLiteral<ui32>(inputRowType->GetMembersCount()));
+    callableBuilder.Add(matchedVarsArg);
+    callableBuilder.Add(TRuntimeNode(TListLiteral::Create(measureColumnIndexes.data(), measureColumnIndexes.size(), indexListType, Env), true));
+    for (const auto& m: measures) {
+        callableBuilder.Add(m);
+    }
+
+    callableBuilder.Add(PatternToRuntimeNode(pattern, *this));
+
+    callableBuilder.Add(currentRowIndexArg);
+    callableBuilder.Add(defineInputDataArg);
+    const auto stringType = NewDataType(NUdf::EDataSlot::String);
+    callableBuilder.Add(TRuntimeNode(TListLiteral::Create(defineNames.begin(), defineNames.size(), TListType::Create(stringType, Env), Env), true));
+    for (const auto& d: defineNodes) {
+        callableBuilder.Add(d);
+    }
+    return TRuntimeNode(callableBuilder.Build(), false);
 }
 
 bool CanExportType(TType* type, const TTypeEnvironment& env) {

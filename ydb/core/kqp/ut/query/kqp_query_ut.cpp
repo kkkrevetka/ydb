@@ -974,10 +974,9 @@ Y_UNIT_TEST_SUITE(KqpQuery) {
         UNIT_ASSERT(compile.cpu_time_us() > 0);
         totalCpuTimeUs += compile.cpu_time_us();
 
-        UNIT_ASSERT_VALUES_EQUAL(stats.query_phases().size(), 3);
-        totalCpuTimeUs += stats.query_phases(0).cpu_time_us();
+        UNIT_ASSERT_VALUES_EQUAL(stats.query_phases().size(), 2);
 
-        auto& phase0 = stats.query_phases(1);
+        auto& phase0 = stats.query_phases(0);
         UNIT_ASSERT(phase0.duration_us() > 0);
         UNIT_ASSERT(phase0.cpu_time_us() > 0);
         totalCpuTimeUs += phase0.cpu_time_us();
@@ -989,7 +988,7 @@ Y_UNIT_TEST_SUITE(KqpQuery) {
         UNIT_ASSERT(!phase0.table_access(0).has_updates());
         UNIT_ASSERT(!phase0.table_access(0).has_deletes());
 
-        auto& phase1 = stats.query_phases(2);
+        auto& phase1 = stats.query_phases(1);
         UNIT_ASSERT(phase1.duration_us() > 0);
         UNIT_ASSERT(phase1.cpu_time_us() > 0);
         totalCpuTimeUs += phase1.cpu_time_us();
@@ -1169,8 +1168,8 @@ Y_UNIT_TEST_SUITE(KqpQuery) {
         )"), TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
         result.GetIssues().PrintTo(Cerr);
         UNIT_ASSERT_VALUES_EQUAL(result.GetStatus(), EStatus::GENERIC_ERROR);
-        UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::DEFAULT_ERROR, [](const NYql::TIssue& issue) {
-            return issue.GetMessage().Contains("not supported");
+        UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::KIKIMR_BAD_OPERATION, [](const NYql::TIssue& issue) {
+            return issue.GetMessage().Contains("can't be performed in data query");
         }));
 
         result = session.ExecuteDataQuery(Q_(R"(

@@ -7,7 +7,7 @@ import re
 from xml.etree import ElementTree as ET
 from pathlib import Path
 from typing import List
-from log_parser import ctest_log_parser, parse_yunit_fails, parse_gtest_fails, log_reader
+from log_parser import ctest_log_parser, parse_yunit_fails, parse_gtest_fails, log_reader, GTEST_MARK, YUNIT_MARK
 from junit_utils import add_junit_log_property, create_error_testcase, create_error_testsuite, suite_case_iterator
 from ctest_utils import CTestLog
 
@@ -28,7 +28,6 @@ def make_filename(n, *parts):
 def save_log(err_lines: List[str], out_path: Path, *parts):
     for x in range(128):
         fn = make_filename(x, *parts)
-        print(f"save {fn} for {'::'.join(parts)}")
         path = out_path.joinpath(fn)
         try:
             with open(path, "xt") as fp:
@@ -37,6 +36,7 @@ def save_log(err_lines: List[str], out_path: Path, *parts):
         except FileExistsError:
             pass
         else:
+            print(f"save {fn} for {'::'.join(parts)}")
             return fn, path
 
     raise Exception("Unable to create file")
@@ -56,20 +56,26 @@ def extract_logs(log_fp: io.StringIO, out_path: Path, url_prefix):
         if not ctest_buf:
             continue
 
-        first_line = ctest_buf[0]
+        line_no = 0
+        while line_no < len(ctest_buf):
+            if ctest_buf[line_no].startswith((YUNIT_MARK, GTEST_MARK)):
+                break
+            line_no += 1
+        else:
+            continue
 
-        if first_line.startswith("[==========]"):
-            for classname, method, err_lines in parse_gtest_fails(ctest_buf):
+        if ctest_buf[line_no].startswith(GTEST_MARK):
+            for classname, method, err_lines in parse_gtest_fails(ctest_buf[line_no:]):
                 fn, path = save_log(err_lines, out_path, classname, method)
                 log_url = f"{url_prefix}{fn}"
                 shard.add_testcase(classname, method, path, log_url)
-        elif first_line.startswith("<-----"):
-            for classname, method, err_lines in parse_yunit_fails(ctest_buf):
+        elif ctest_buf[line_no].startswith(YUNIT_MARK):
+            for classname, method, err_lines in parse_yunit_fails(ctest_buf[line_no:]):
                 fn, path = save_log(err_lines, out_path, classname, method)
                 log_url = f"{url_prefix}{fn}"
                 shard.add_testcase(classname, method, path, log_url)
         else:
-            pass
+            raise Exception("We checked known test markers in the while loop")
 
     return ctestlog
 

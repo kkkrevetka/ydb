@@ -8,3 +8,4 @@
 
 add_subdirectory(validator)
 add_subdirectory(validator_builder)
+add_subdirectory(validator_checks)

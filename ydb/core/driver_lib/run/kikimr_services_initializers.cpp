@@ -65,6 +65,8 @@
 
 #include <ydb/core/health_check/health_check.h>
 
+#include <ydb/core/kafka_proxy/actors/kafka_metrics_actor.h>
+#include <ydb/core/kafka_proxy/kafka_metrics.h>
 #include <ydb/core/kafka_proxy/kafka_proxy.h>
 
 #include <ydb/core/kqp/common/kqp.h>
@@ -110,6 +112,7 @@
 #include <ydb/core/scheme/scheme_type_registry.h>
 
 #include <ydb/core/security/ticket_parser.h>
+#include <ydb/core/security/ldap_auth_provider.h>
 
 #include <ydb/core/sys_view/processor/processor.h>
 #include <ydb/core/sys_view/service/sysview_service.h>
@@ -1589,6 +1592,13 @@ TSecurityServicesInitializer::TSecurityServicesInitializer(const TKikimrRunConfi
 
 void TSecurityServicesInitializer::InitializeServices(NActors::TActorSystemSetup* setup,
                                                       const NKikimr::TAppData* appData) {
+    const auto& authConfig = appData->AuthConfig;
+    if (!IsServiceInitialized(setup, MakeLdapAuthProviderID()) && authConfig.HasLdapAuthentication()) {
+        IActor* ldapAuthProvider = CreateLdapAuthProvider(authConfig.GetLdapAuthentication());
+        if (ldapAuthProvider) {
+            setup->LocalServices.push_back(std::make_pair<TActorId, TActorSetupCmd>(MakeLdapAuthProviderID(), TActorSetupCmd(ldapAuthProvider, TMailboxType::HTSwap, appData->UserPoolId)));
+        }
+    }
     if (!IsServiceInitialized(setup, MakeTicketParserID())) {
         IActor* ticketParser = nullptr;
         if (Factories && Factories->CreateTicketParser) {
@@ -2095,8 +2105,10 @@ void TKqpServiceInitializer::InitializeServices(NActors::TActorSystemSetup* setu
         GlobalObjects.AddGlobalObject(std::make_shared<NYql::NLog::YqlLoggerScope>(
             new NYql::NLog::TTlsLogBackend(new TNullLogBackend())));
 
-        auto proxy = NKqp::CreateKqpProxyService(Config.GetLogConfig(), Config.GetTableServiceConfig(), Config.GetAuthConfig().GetTokenAccessorConfig(),
-            std::move(settings), Factories->QueryReplayBackendFactory, std::move(kqpProxySharedResources));
+        auto proxy = NKqp::CreateKqpProxyService(Config.GetLogConfig(), Config.GetTableServiceConfig(),
+            Config.GetQueryServiceConfig(),  Config.GetMetadataProviderConfig(), std::move(settings), Factories->QueryReplayBackendFactory, std::move(kqpProxySharedResources),
+            NKqp::MakeKqpFederatedQuerySetupFactory(setup, appData, Config)
+        );
         setup->LocalServices.push_back(std::make_pair(
             NKqp::MakeKqpProxyID(NodeId),
             TActorSetupCmd(proxy, TMailboxType::HTSwap, appData->UserPoolId)));
@@ -2625,6 +2637,13 @@ void TKafkaProxyServiceInitializer::InitializeServices(NActors::TActorSystemSetu
         setup->LocalServices.emplace_back(
             TActorId(),
             TActorSetupCmd(NKafka::CreateKafkaListener(MakePollerActorId(), settings, Config.GetKafkaProxyConfig()),
+                TMailboxType::HTSwap, appData->UserPoolId)
+        );
+
+        IActor* metricsActor = CreateKafkaMetricsActor(NKafka::TKafkaMetricsSettings{appData->Counters->GetSubgroup("counters", "datastreams")}); // FIXME savnik: change to kafka_proxy
+        setup->LocalServices.emplace_back(
+            NKafka::MakeKafkaMetricsServiceID(),
+            TActorSetupCmd(metricsActor,
                 TMailboxType::HTSwap, appData->UserPoolId)
         );
     }

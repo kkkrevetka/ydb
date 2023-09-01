@@ -31,10 +31,18 @@ public:
             auto output = input;
             bool hasDqSource = false;
 
-            if (TCoFlatMap::Match(input.Get())){
+            if (TCoFlatMap::Match(input.Get())) {
                 NDq::InferStatisticsForFlatMap(input, State->TypeCtx);
-            } else if(TCoSkipNullMembers::Match(input.Get())){
+            } else if(TCoSkipNullMembers::Match(input.Get())) {
                 NDq::InferStatisticsForSkipNullMembers(input, State->TypeCtx);
+            } else if(TCoExtractMembers::Match(input.Get())){
+                NDq::InferStatisticsForExtractMembers(input, State->TypeCtx);
+            }
+            else if(TCoAggregateCombine::Match(input.Get())){
+                NDq::InferStatisticsForAggregateCombine(input, State->TypeCtx);
+            }
+            else if(TCoAggregateMergeFinalize::Match(input.Get())){
+                NDq::InferStatisticsForAggregateMergeFinalize(input, State->TypeCtx);
             } else if (TDqReadWrapBase::Match(input.Get()) || (hasDqSource = TDqSourceWrapBase::Match(input.Get()))) {
                 auto node = hasDqSource
                     ? input
@@ -50,6 +58,22 @@ public:
                     if (stat) {
                         State->TypeCtx->SetStats(input.Get(), std::move(std::make_shared<TOptimizerStatistics>(*stat)));
                     }
+                }
+            }
+            // Don't propagate statistics and costs in case of EquiJoin, join reordering only works if costs have
+            // not been propagated yet
+            else if (TCoEquiJoin::Match(input.Get())){
+            } else {
+                // default sum propagation
+                TOptimizerStatistics stat;
+                for (const auto& child : input->Children()) {
+                    auto chStat = State->TypeCtx->GetStats(child.Get());
+                    if (chStat) {
+                        stat += *chStat;
+                    }
+                }
+                if (!stat.Empty()) {
+                    State->TypeCtx->SetStats(input.Get(), std::move(std::make_shared<TOptimizerStatistics>(stat)));
                 }
             }
             return output;

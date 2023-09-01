@@ -109,7 +109,7 @@ public:
 
         Y_VERIFY(!ScanIterator);
         MemoryAccessor = std::make_shared<NOlap::TActorBasedMemoryAccesor>(SelfId(), "CSScan/Result");
-        NOlap::TReadContext context(MakeTasksProcessor(), ScanCountersPool, MemoryAccessor);
+        NOlap::TReadContext context(MakeTasksProcessor(), ScanCountersPool, MemoryAccessor, false);
         ScanIterator = ReadMetadataRanges[ReadMetadataIndex]->StartScan(context);
 
         // propagate self actor id // TODO: FlagSubscribeOnSession ?
@@ -149,12 +149,13 @@ private:
         THashMap<TUnifiedBlobId, std::vector<NBlobCache::TBlobRange>> ranges;
         while (InFlightGuard.CanTake()) {
             auto blobRange = ScanIterator->GetNextBlobToRead();
-            if (!blobRange.BlobId.IsValid()) {
+            if (!blobRange) {
                 break;
             }
-            InFlightGuard.Take(blobRange.Size);
+            Y_VERIFY(blobRange->BlobId.IsValid());
+            InFlightGuard.Take(blobRange->Size);
             ++InFlightReads;
-            ranges[blobRange.BlobId].emplace_back(blobRange);
+            ranges[blobRange->BlobId].emplace_back(*blobRange);
         }
         if (!InFlightGuard.CanTake()) {
             ScanCountersPool.OnReadingOverloaded();
@@ -191,7 +192,9 @@ private:
             ACFL_DEBUG("event", "TEvTaskProcessedResult");
             auto t = static_pointer_cast<IDataTasksProcessor::ITask>(ev->Get()->GetResult());
             Y_VERIFY_DEBUG(dynamic_pointer_cast<IDataTasksProcessor::ITask>(ev->Get()->GetResult()));
-            ScanIterator->Apply(t);
+            if (!ScanIterator->Finished()) {
+                ScanIterator->Apply(t);
+            }
             if (!ScanIterator->HasWaitingTasks() && !NoTasksStartInstant) {
                 NoTasksStartInstant = Now();
             }
@@ -372,7 +375,7 @@ private:
         // The loop has finished without any progress!
         LOG_ERROR_S(*TlsActivationContext, NKikimrServices::TX_COLUMNSHARD_SCAN,
             "Scan " << ScanActorId << " is hanging"
-            << " txId: " << TxId << " scanId: " << ScanId << " gen: " << ScanGen << " tablet: " << TabletId);
+            << " txId: " << TxId << " scanId: " << ScanId << " gen: " << ScanGen << " tablet: " << TabletId << " debug: " << ScanIterator->DebugString());
         Y_VERIFY_DEBUG(false);
     }
 
@@ -445,7 +448,7 @@ private:
             return Finish();
         }
 
-        NOlap::TReadContext context(MakeTasksProcessor(), ScanCountersPool, MemoryAccessor);
+        NOlap::TReadContext context(MakeTasksProcessor(), ScanCountersPool, MemoryAccessor, false);
         ScanIterator = ReadMetadataRanges[ReadMetadataIndex]->StartScan(context);
         // Used in TArrowToYdbConverter
         ResultYqlSchema.clear();
@@ -805,7 +808,7 @@ private:
 };
 
 static bool FillPredicatesFromRange(NOlap::TReadDescription& read, const ::NKikimrTx::TKeyRange& keyRange,
-                                    const std::vector<std::pair<TString, NScheme::TTypeInfo>>& ydbPk, ui64 tabletId, const NOlap::TIndexInfo* indexInfo) {
+                                    const std::vector<std::pair<TString, NScheme::TTypeInfo>>& ydbPk, ui64 tabletId, const NOlap::TIndexInfo* indexInfo, TString& error) {
     TSerializedTableRange range(keyRange);
     auto fromPredicate = std::make_shared<NOlap::TPredicate>();
     auto toPredicate = std::make_shared<NOlap::TPredicate>();
@@ -817,7 +820,11 @@ static bool FillPredicatesFromRange(NOlap::TReadDescription& read, const ::NKiki
         << " less predicate over columns: " << toPredicate->ToString()
         << " at tablet " << tabletId);
 
-    return read.PKRangesFilter.Add(fromPredicate, toPredicate, indexInfo);
+    if (!read.PKRangesFilter.Add(fromPredicate, toPredicate, indexInfo)) {
+        error = "Error building filter";
+        return false;
+    }
+    return true;
 }
 
 std::shared_ptr<NOlap::TReadStatsMetadata>
@@ -878,7 +885,7 @@ std::shared_ptr<NOlap::TReadMetadataBase> TTxScan::CreateReadMetadata(NOlap::TRe
     }
 
     if (!metadata) {
-        return {};
+        return nullptr;
     }
 
     if (itemsLimit) {
@@ -957,7 +964,7 @@ bool TTxScan::Execute(TTransactionContext& txc, const TActorContext& ctx) {
         indexInfo->GetPrimaryKey();
 
     for (auto& range: record.GetRanges()) {
-        if (!FillPredicatesFromRange(read, range, ydbKey, Self->TabletID(), isIndexStats ? nullptr : indexInfo)) {
+        if (!FillPredicatesFromRange(read, range, ydbKey, Self->TabletID(), isIndexStats ? nullptr : indexInfo, ErrorDescription)) {
             ReadMetadataRanges.clear();
             return true;
         }
@@ -1025,12 +1032,11 @@ void TTxScan::Complete(const TActorContext& ctx) {
                 << detailedInfo.Str()
                 << " at tablet " << Self->TabletID());
 
-        Y_VERIFY(ErrorDescription);
         auto ev = MakeHolder<TEvKqpCompute::TEvScanError>(scanGen);
 
         ev->Record.SetStatus(Ydb::StatusIds::BAD_REQUEST);
         auto issue = NYql::YqlIssue({}, NYql::TIssuesIds::KIKIMR_BAD_REQUEST, TStringBuilder()
-            << "Table " << table << " (shard " << Self->TabletID() << ") scan failed, reason: " << ErrorDescription);
+            << "Table " << table << " (shard " << Self->TabletID() << ") scan failed, reason: " << ErrorDescription ? ErrorDescription : "unknown error");
         NYql::IssueToMessage(issue, ev->Record.MutableIssues()->Add());
 
         ctx.Send(scanComputeActor, ev.Release());

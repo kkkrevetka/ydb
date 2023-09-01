@@ -1,6 +1,7 @@
 #include "sql_ut.h"
 #include "match_recognize.h"
 #include <ydb/library/yql/providers/common/provider/yql_provider_names.h>
+#include <ydb/library/yql/core/sql_types/match_recognize.h>
 #include <ydb/library/yql/sql/sql.h>
 #include <util/generic/map.h>
 
@@ -127,7 +128,49 @@ FROM Input MATCH_RECOGNIZE(
         //TODO https://st.yandex-team.ru/YQL-16186
     }
     Y_UNIT_TEST(RowsPerMatch) {
-        //TODO https://st.yandex-team.ru/YQL-16186
+        {
+            const auto stmt = R"(
+USE plato;
+SELECT *
+FROM Input MATCH_RECOGNIZE(
+    ONE ROW PER MATCH
+    PATTERN (A)
+    DEFINE A as A
+)
+)";
+            auto r = MatchRecognizeSqlToYql(stmt);
+            UNIT_ASSERT(r.IsOk());
+            auto rowsPerMatch = FindMatchRecognizeParam(r.Root, "rowsPerMatch");
+            UNIT_ASSERT_VALUES_EQUAL("RowsPerMatch_OneRow", rowsPerMatch->GetChild(1)->GetContent());
+        }
+        {
+            const auto stmt = R"(
+USE plato;
+SELECT *
+FROM Input MATCH_RECOGNIZE(
+    ALL ROWS PER MATCH
+    PATTERN (A)
+    DEFINE A as A
+)
+)";
+            auto r = MatchRecognizeSqlToYql(stmt);
+            UNIT_ASSERT(not r.IsOk()); ///https://st.yandex-team.ru/YQL-16213
+        }
+        { //default
+            const auto stmt = R"(
+USE plato;
+SELECT *
+FROM Input MATCH_RECOGNIZE(
+    PATTERN (A)
+    DEFINE A as A
+)
+)";
+            auto r = MatchRecognizeSqlToYql(stmt);
+            UNIT_ASSERT(r.IsOk());
+            auto rowsPerMatch = FindMatchRecognizeParam(r.Root, "rowsPerMatch");
+            UNIT_ASSERT_VALUES_EQUAL("RowsPerMatch_OneRow", rowsPerMatch->GetChild(1)->GetContent());
+        }
+
     }
     Y_UNIT_TEST(SkipAfterMatch) {
         {
@@ -248,9 +291,34 @@ FROM Input MATCH_RECOGNIZE(
             UNIT_ASSERT(not r.IsOk());
         }
     }
-    Y_UNIT_TEST(row_pattern_initial_or_seek) {
-        //TODO https://st.yandex-team.ru/YQL-16186
+    Y_UNIT_TEST(row_pattern_initial) {
+        const auto stmt = R"(
+USE plato;
+SELECT *
+FROM Input MATCH_RECOGNIZE(
+    INITIAL
+    PATTERN (A+  B* C?)
+    DEFINE A as A
+    )
+)";
+        auto r = MatchRecognizeSqlToYql(stmt);
+        UNIT_ASSERT(not r.IsOk());
     }
+
+    Y_UNIT_TEST(row_pattern_seek) {
+        const auto stmt = R"(
+USE plato;
+SELECT *
+FROM Input MATCH_RECOGNIZE(
+    SEEK
+    PATTERN (A+  B* C?)
+    DEFINE A as A
+    )
+)";
+        auto r = MatchRecognizeSqlToYql(stmt);
+        UNIT_ASSERT(not r.IsOk());
+    }
+
     Y_UNIT_TEST(PatternSimple) {
         const auto stmt = R"(
 USE plato;
@@ -359,7 +427,7 @@ FROM Input MATCH_RECOGNIZE(
         auto getTheFactor = [](const NYql::TAstNode* root) {
             const auto& patternCallable = FindMatchRecognizeParam(root, "pattern");
             const auto& factor =  patternCallable->GetChild(1)->GetChild(1)->GetChild(0)->GetChild(1);
-            return NSQLTranslationV1::TRowPatternFactor{
+            return NYql::NMatchRecognize::TRowPatternFactor{
                     TString(), //primary var or subexpression, not used in this test
                     FromString<uint64_t>(factor->GetChild(1)->GetChild(1)->GetContent()), //QuantityMin
                     FromString<uint64_t>(factor->GetChild(2)->GetChild(1)->GetContent()), //QuantityMax

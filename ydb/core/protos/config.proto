@@ -1382,15 +1382,17 @@ message TTableServiceConfig {
 };
 
 message TQueryServiceConfig {
-    optional uint64 ScriptOperationTimeoutDefaultSeconds = 1;
-    optional uint64 ScriptForgetAfterDefaultSeconds = 2; // 0 = infinity
-    optional uint64 ScriptResultsTtlDefaultSeconds = 3; // 0 = infinity
-    optional uint64 ScriptResultSizeLimit = 4; // 0 = infinity
-    optional uint64 ScriptResultRowsLimit = 5; // 0 = infinity
+    optional uint64 ScriptOperationTimeoutDefaultSeconds = 1 [default = 604800]; // default = 1 week
+    optional uint64 ScriptForgetAfterDefaultSeconds = 2 [default = 31536000]; // default = 1 year; 0 = infinity
+    optional uint64 ScriptResultsTtlDefaultSeconds = 3 [default = 2592000];  // default = 1 month; 0 = infinity
+    optional uint64 ScriptResultSizeLimit = 4 [default = 0]; // 0 = infinity
+    optional uint64 ScriptResultRowsLimit = 5 [default = 0]; // 0 = infinity
 
     optional NYql.TS3GatewayConfig S3 = 6;
     optional NYql.THttpGatewayConfig HttpGateway = 7;
     optional NYql.TGenericConnectorConfig Connector = 8;
+    optional string MdbGateway = 9;
+    optional bool MdbTransformHost = 10;
 }
 
 // Config describes immediate controls and allows
@@ -1766,6 +1768,7 @@ message TDataShardConfig {
     optional uint64 RestoreReadBufferSizeLimit = 16 [default = 268435456]; // 256 MB
     optional string CdcInitialScanTaskName = 17 [default = "cdc_initial_scan"];
     optional uint32 CdcInitialScanTaskPriority = 18 [default = 10];
+    optional bool DisabledOnSchemeShard = 19 [default = false];
 }
 
 message TColumnShardConfig {
@@ -1783,6 +1786,7 @@ message TColumnShardConfig {
 
     }
     optional TTablesStorageLayoutPolicy TablesStorageLayoutPolicy = 1;
+    optional bool DisabledOnSchemeShard = 2 [default = true];
 }
 
 message TSchemeShardConfig {
@@ -1928,7 +1932,7 @@ message TLocalPgWireConfig {
 }
 
 message TKafkaProxyConfig {
-    optional bool EnableKafkaProxy = 1 [default = true];
+    optional bool EnableKafkaProxy = 1 [default = false];
 
     optional int32 ListeningPort = 2 [default = 9092];
     optional string SslCertificate = 3;
@@ -1936,6 +1940,13 @@ message TKafkaProxyConfig {
     optional uint64 MaxMessageSize = 4 [default = 268435456];
     optional uint64 MaxInflightSize = 5 [default = 268435456];
     optional uint64 PacketSize = 6 [default = 1500];
+
+    message TProxy {
+        optional string Hostname = 1;
+        optional int32 Port = 2 [default = 9092];
+    }
+
+    optional TProxy Proxy = 7;
 }
 
 message TAwsCompatibilityConfig {

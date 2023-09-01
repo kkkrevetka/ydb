@@ -128,8 +128,8 @@ public:
         const NKikimrConfig::TTableServiceConfig::TExecuterRetriesConfig& executerRetriesConfig,
         NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory,
         const NKikimrConfig::TTableServiceConfig::EChannelTransportVersion chanTransportVersion,
-        const TActorId& creator)
-        : TBase(std::move(request), database, userToken, counters, executerRetriesConfig, chanTransportVersion, TWilsonKqp::DataExecuter, "DataExecuter")
+        const TActorId& creator, TDuration maximalSecretsSnapshotWaitTime)
+        : TBase(std::move(request), database, userToken, counters, executerRetriesConfig, chanTransportVersion, maximalSecretsSnapshotWaitTime, TWilsonKqp::DataExecuter, "DataExecuter")
         , AsyncIoFactory(std::move(asyncIoFactory))
         , StreamResult(streamResult)
     {
@@ -295,6 +295,7 @@ public:
                 hFunc(TEvKqp::TEvAbortExecution, HandleAbortExecution);
                 hFunc(NMetadata::NProvider::TEvRefreshSubscriberData, HandleRefreshSubscriberData);
                 hFunc(TEvPrivate::TEvResourcesSnapshot, HandleResolve);
+                hFunc(NActors::TEvents::TEvWakeup, HandleSecretsWaitingTimeout);
                 default:
                     UnexpectedEvent("WaitResolveState", ev->GetTypeRewrite());
             }
@@ -1522,7 +1523,7 @@ private:
 
             switch (input.GetTypeCase()) {
                 case NKqpProto::TKqpPhyConnection::kHashShuffle: {
-                    partitionsCount = std::max(partitionsCount, (ui32)originStageInfo.Tasks.size() / 2);
+                    partitionsCount = std::max(partitionsCount, (ui32)originStageInfo.Tasks.size());
                     partitionsCount = std::min(partitionsCount, 24u);
                     break;
                 }
@@ -1655,9 +1656,11 @@ private:
     }
 
     void DoExecute() {
+        TVector<TString> secretNames;
         for (const auto& transaction : Request.Transactions) {
-            if (!transaction.Body->GetSecretNames().empty()) {                
+            for (const auto& secretName : transaction.Body->GetSecretNames()) {          
                 SecretSnapshotRequired = true;
+                secretNames.push_back(secretName);
             }
             for (const auto& stage : transaction.Body->GetStages()) {
                 if (stage.SourcesSize() > 0 && stage.GetSources(0).GetTypeCase() == NKqpProto::TKqpSource::kExternalSource) {
@@ -1671,7 +1674,7 @@ private:
             return Execute();
         }
         if (SecretSnapshotRequired) {
-            FetchSecrets();
+            FetchSecrets(std::move(secretNames));
         }
         if (ResourceSnapshotRequired) {
             GetResourcesSnapshot();
@@ -2261,10 +2264,9 @@ private:
     }
 
     void ExecuteTopicTabletTransactions(TTopicTabletTxs& topicTxs) {
-        auto lockTxId = Request.AcquireLocksTxId;
-        if (lockTxId.Defined() && *lockTxId == 0) {
-            lockTxId = TxId;
-            LockHandle = TLockHandle(TxId, TActivationContext::ActorSystem());
+        TMaybe<ui64> writeId;
+        if (Request.TopicOperations.HasWriteId()) {
+            writeId = Request.TopicOperations.GetWriteId();
         }
 
         for (auto& tx : topicTxs) {
@@ -2273,8 +2275,8 @@ private:
 
             auto ev = std::make_unique<TEvPersQueue::TEvProposeTransaction>();
 
-            if (lockTxId) {
-                transaction.SetLockTxId(*lockTxId);
+            if (writeId.Defined()) {
+                transaction.SetWriteId(*writeId);
             }
             transaction.SetImmediate(ImmediateTx);
 
@@ -2286,7 +2288,7 @@ private:
             LOG_D("ExecuteTopicTabletTransaction traceId.verbosity: " << std::to_string(traceId.GetVerbosity()));
 
             LOG_D("Executing KQP transaction on topic tablet: " << tabletId
-                  << ", lockTxId: " << lockTxId);
+                  << ", writeId: " << writeId);
 
             Send(MakePipePeNodeCacheID(false),
                  new TEvPipeCache::TEvForward(ev.release(), tabletId, true),
@@ -2413,10 +2415,10 @@ private:
 IActor* CreateKqpDataExecuter(IKqpGateway::TExecPhysicalRequest&& request, const TString& database, const TIntrusiveConstPtr<NACLib::TUserToken>& userToken,
     TKqpRequestCounters::TPtr counters, bool streamResult, const NKikimrConfig::TTableServiceConfig::TExecuterRetriesConfig& executerRetriesConfig,
     NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory, const NKikimrConfig::TTableServiceConfig::EChannelTransportVersion chanTransportVersion,
-    const TActorId& creator)
+    const TActorId& creator, TDuration maximalSecretsSnapshotWaitTime)
 {
     return new TKqpDataExecuter(std::move(request), database, userToken, counters, streamResult, executerRetriesConfig,
-        std::move(asyncIoFactory), chanTransportVersion, creator);
+        std::move(asyncIoFactory), chanTransportVersion, creator, maximalSecretsSnapshotWaitTime);
 }
 
 } // namespace NKqp

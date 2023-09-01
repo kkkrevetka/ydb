@@ -149,21 +149,22 @@ public:
     }
 
    TKqpSessionActor(const TActorId& owner, const TString& sessionId, const TKqpSettings::TConstPtr& kqpSettings,
-            const TKqpWorkerSettings& workerSettings, NYql::IHTTPGateway::TPtr httpGateway,
+            const TKqpWorkerSettings& workerSettings, 
+            std::optional<TKqpFederatedQuerySetup> federatedQuerySetup,
             NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory,
-            NYql::ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory,
-            TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters)
+            TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters,
+            const NKikimrConfig::TMetadataProviderConfig& metadataProviderConfig)
         : Owner(owner)
         , SessionId(sessionId)
         , Counters(counters)
         , Settings(workerSettings)
-        , HttpGateway(std::move(httpGateway))
         , AsyncIoFactory(std::move(asyncIoFactory))
-        , CredentialsFactory(std::move(credentialsFactory))
         , ModuleResolverState(std::move(moduleResolverState))
+        , FederatedQuerySetup(federatedQuerySetup)
         , KqpSettings(kqpSettings)
         , Config(CreateConfig(kqpSettings, workerSettings))
         , Transactions(*Config->_KqpMaxActiveTxPerSession.Get(), TDuration::Seconds(*Config->_KqpTxIdleTimeoutSec.Get()))
+        , MetadataProviderConfig(metadataProviderConfig)
     {
         RequestCounters = MakeIntrusive<TKqpRequestCounters>();
         RequestCounters->Counters = Counters;
@@ -214,13 +215,13 @@ public:
         ev->Get()->SetClientLostAction(selfId, as);
         QueryState = std::make_shared<TKqpQueryState>(
             ev, QueryId, Settings.Database, Settings.Cluster, Settings.DbCounters, Settings.LongSession,
-            Settings.Service, std::move(id));
+            Settings.TableService, Settings.QueryService, std::move(id));
     }
 
     void ForwardRequest(TEvKqp::TEvQueryRequest::TPtr& ev) {
         if (!WorkerId) {
             std::unique_ptr<IActor> workerActor(CreateKqpWorkerActor(SelfId(), SessionId, KqpSettings, Settings,
-                HttpGateway, ModuleResolverState, Counters, CredentialsFactory));
+                FederatedQuerySetup, ModuleResolverState, Counters, MetadataProviderConfig));
             WorkerId = RegisterWithSameMailbox(workerActor.release());
         }
         TlsActivationContext->Send(new IEventHandle(*WorkerId, SelfId(), QueryState->RequestEv.release(), ev->Flags, ev->Cookie,
@@ -986,8 +987,8 @@ public:
                 request.PerShardKeysSizeLimitBytes = Config->_CommitPerShardKeysSizeLimitBytes.Get().GetRef();
             }
 
-            if (txCtx.Locks.HasLocks() || txCtx.TopicOperations.HasReadOperations()) {
-                if (!txCtx.GetSnapshot().IsValid() || txCtx.TxHasEffects() || txCtx.TopicOperations.HasReadOperations()) {
+            if (txCtx.Locks.HasLocks() || txCtx.TopicOperations.HasOperations()) {
+                if (!txCtx.GetSnapshot().IsValid() || txCtx.TxHasEffects() || txCtx.TopicOperations.HasOperations()) {
                     LOG_D("TExecPhysicalRequest, tx has commit locks");
                     request.LocksOp = ELocksOp::Commit;
                 } else {
@@ -1045,8 +1046,8 @@ public:
 
         auto executerActor = CreateKqpExecuter(std::move(request), Settings.Database,
             QueryState ? QueryState->UserToken : TIntrusiveConstPtr<NACLib::TUserToken>(),
-            RequestCounters, Settings.Service.GetAggregationConfig(), Settings.Service.GetExecuterRetriesConfig(),
-            AsyncIoFactory, QueryState ? QueryState->PreparedQuery : nullptr, Settings.Service.GetChannelTransportVersion(), SelfId());
+            RequestCounters, Settings.TableService.GetAggregationConfig(), Settings.TableService.GetExecuterRetriesConfig(),
+            AsyncIoFactory, QueryState ? QueryState->PreparedQuery : nullptr, Settings.TableService.GetChannelTransportVersion(), SelfId(), 2 * TDuration::Seconds(MetadataProviderConfig.GetRefreshPeriodSeconds()));
 
         auto exId = RegisterWithSameMailbox(executerActor);
         LOG_D("Created new KQP executer: " << exId << " isRollback: " << isRollback);
@@ -1402,6 +1403,8 @@ public:
 
         bool replyQueryId = false;
         bool replyQueryParameters = false;
+        bool replyTopicOperations = false;
+
         switch (QueryState->GetAction()) {
             case NKikimrKqp::QUERY_ACTION_PREPARE:
                 replyQueryId = true;
@@ -1415,6 +1418,10 @@ public:
             case NKikimrKqp::QUERY_ACTION_PARSE:
             case NKikimrKqp::QUERY_ACTION_VALIDATE:
                 replyQueryParameters = true;
+                break;
+
+            case NKikimrKqp::QUERY_ACTION_TOPIC:
+                replyTopicOperations = true;
                 break;
 
             default:
@@ -1433,6 +1440,12 @@ public:
                 queryId = QueryState->CompileResult->Uid;
             }
             response->SetPreparedQuery(queryId);
+        }
+
+        if (replyTopicOperations) {
+            if (HasTopicWriteId()) {
+                response->MutableTopicOperations()->SetWriteId(GetTopicWriteId());
+            }
         }
 
         // Result for scan query is sent directly to target actor.
@@ -1513,7 +1526,7 @@ public:
 
     void ReplyBusy(TEvKqp::TEvQueryRequest::TPtr& ev) {
         ui64 proxyRequestId = ev->Cookie;
-        auto busyStatus = Settings.Service.GetUseSessionBusyStatus()
+        auto busyStatus = Settings.TableService.GetUseSessionBusyStatus()
             ? Ydb::StatusIds::SESSION_BUSY
             : Ydb::StatusIds::PRECONDITION_FAILED;
 
@@ -1996,6 +2009,7 @@ public:
                 hFunc(TEvKqp::TEvQueryRequest, HandleTopicOps);
 
                 hFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, HandleTopicOps);
+                hFunc(TEvTxUserProxy::TEvAllocateTxIdResult, HandleTopicOps);
 
                 hFunc(TEvKqp::TEvCloseSessionRequest, HandleTopicOps);
                 hFunc(TEvKqp::TEvInitiateSessionShutdown, Handle);
@@ -2074,13 +2088,38 @@ private:
             ythrow TRequestFail(Ydb::StatusIds::BAD_REQUEST) << message;
         }
 
-        ReplySuccess();
+        if (HasTopicWriteOperations() && !HasTopicWriteId()) {
+            Send(MakeTxProxyID(), new TEvTxUserProxy::TEvAllocateTxId);
+        } else {
+            ReplySuccess();
+        }
     }
 
     void HandleTopicOps(TEvKqp::TEvCloseSessionRequest::TPtr&) {
         YQL_ENSURE(QueryState);
         ReplyQueryError(Ydb::StatusIds::BAD_SESSION, "Request cancelled due to explicit session close request");
         Counters->ReportSessionActorClosedRequest(Settings.DbCounters);
+    }
+
+    void HandleTopicOps(TEvTxUserProxy::TEvAllocateTxIdResult::TPtr& ev) {
+        SetTopicWriteId(NLongTxService::TLockHandle(ev->Get()->TxId, TActivationContext::ActorSystem()));
+        ReplySuccess();
+    }
+
+    bool HasTopicWriteOperations() const {
+        return QueryState->TxCtx->TopicOperations.HasWriteOperations();
+    }
+
+    bool HasTopicWriteId() const {
+        return QueryState->TxCtx->TopicOperations.HasWriteId();
+    }
+
+    ui64 GetTopicWriteId() const {
+        return QueryState->TxCtx->TopicOperations.GetWriteId();
+    }
+
+    void SetTopicWriteId(NLongTxService::TLockHandle handle) {
+        QueryState->TxCtx->TopicOperations.SetWriteId(std::move(handle));
     }
 
 private:
@@ -2091,10 +2130,9 @@ private:
     TIntrusivePtr<TKqpCounters> Counters;
     TIntrusivePtr<TKqpRequestCounters> RequestCounters;
     TKqpWorkerSettings Settings;
-    NYql::IHTTPGateway::TPtr HttpGateway;
     NYql::NDq::IDqAsyncIoFactory::TPtr AsyncIoFactory;
-    NYql::ISecuredServiceAccountCredentialsFactory::TPtr CredentialsFactory;
     TIntrusivePtr<TModuleResolverState> ModuleResolverState;
+    std::optional<TKqpFederatedQuerySetup> FederatedQuerySetup;
     TKqpSettings::TConstPtr KqpSettings;
     std::optional<TActorId> WorkerId;
     TActorId ExecuterId;
@@ -2111,17 +2149,23 @@ private:
     NTxProxy::TRequestControls RequestControls;
 
     TKqpTempTablesState TempTablesState;
+
+    NKikimrConfig::TMetadataProviderConfig MetadataProviderConfig;
 };
 
 } // namespace
 
 IActor* CreateKqpSessionActor(const TActorId& owner, const TString& sessionId,
     const TKqpSettings::TConstPtr& kqpSettings, const TKqpWorkerSettings& workerSettings,
-    NYql::IHTTPGateway::TPtr httpGateway, NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory,
-    NYql::ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory,
-    TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters)
+    std::optional<TKqpFederatedQuerySetup> federatedQuerySetup,
+    NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory,
+    TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters,
+    const NKikimrConfig::TMetadataProviderConfig& metadataProviderConfig)
 {
-    return new TKqpSessionActor(owner, sessionId, kqpSettings, workerSettings, std::move(httpGateway), std::move(asyncIoFactory), std::move(credentialsFactory), std::move(moduleResolverState), counters);
+    return new TKqpSessionActor(owner, sessionId, kqpSettings, workerSettings, federatedQuerySetup,
+                                std::move(asyncIoFactory),  std::move(moduleResolverState), counters,
+                                metadataProviderConfig
+                                );
 }
 
 }

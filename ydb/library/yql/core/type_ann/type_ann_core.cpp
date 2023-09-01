@@ -12052,7 +12052,6 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["NarrowFlatMap"] = &NarrowFlatMapWrapper;
         Functions["NarrowMultiMap"] = &NarrowMultiMapWrapper;
 
-        Functions["WideToBlocks"] = &WideToBlocksWrapper;
         Functions["WideFromBlocks"] = &WideFromBlocksWrapper;
         Functions["WideSkipBlocks"] = &WideSkipTakeBlocksWrapper;
         Functions["WideTakeBlocks"] = &WideSkipTakeBlocksWrapper;
@@ -12063,7 +12062,6 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["WideSortBlocks"] = &WideSortBlocksWrapper;
         Functions["BlockExtend"] = &BlockExtendWrapper;
 
-        Functions["AsScalar"] = &AsScalarWrapper;
         Functions["BlockCoalesce"] = &BlockCoalesceWrapper;
         Functions["BlockAnd"] = &BlockLogicalWrapper;
         Functions["BlockOr"] = &BlockLogicalWrapper;
@@ -12080,6 +12078,8 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         ExtFunctions["BlockFunc"] = &BlockFuncWrapper;
         ExtFunctions["BlockBitCast"] = &BlockBitCastWrapper;
 
+        ExtFunctions["AsScalar"] = &AsScalarWrapper;
+        ExtFunctions["WideToBlocks"] = &WideToBlocksWrapper;
         ExtFunctions["BlockCombineAll"] = &BlockCombineAllWrapper;
         ExtFunctions["BlockCombineHashed"] = &BlockCombineHashedWrapper;
         ExtFunctions["BlockMergeFinalizeHashed"] = &BlockMergeFinalizeHashedWrapper;
@@ -12107,7 +12107,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["MatchRecognizeMeasures"] = &MatchRecognizeMeasuresWrapper;
         Functions["MatchRecognizePattern"] = &MatchRecognizePatternWrapper;
         Functions["MatchRecognizeDefines"] = &MatchRecognizeDefinesWrapper;
-        Functions["MatchRecognizeCore"] = &MatchRecognizeCoreWrapper;
+        ExtFunctions["MatchRecognizeCore"] = &MatchRecognizeCoreWrapper;
 
         Functions["FromPg"] = &FromPgWrapper;
         Functions["ToPg"] = &ToPgWrapper;

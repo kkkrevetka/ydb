@@ -13,7 +13,7 @@
 namespace NYql {
 namespace NTypeAnnImpl {
 
-IGraphTransformer::TStatus AsScalarWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TContext& ctx) {
+IGraphTransformer::TStatus AsScalarWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TExtContext& ctx) {
     Y_UNUSED(output);
     if (!EnsureArgsCount(*input, 1U, ctx.Expr)) {
         return IGraphTransformer::TStatus::Error;
@@ -26,6 +26,10 @@ IGraphTransformer::TStatus AsScalarWrapper(const TExprNode::TPtr& input, TExprNo
     auto type = input->Head().GetTypeAnn();
     if (type->GetKind() == ETypeAnnotationKind::Block || type->GetKind() == ETypeAnnotationKind::Scalar) {
         ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Pos()), "Input type should not be a block or scalar"));
+        return IGraphTransformer::TStatus::Error;
+    }
+
+    if (!EnsureSupportedAsBlockType(input->Pos(), *type, ctx.Expr, ctx.Types)) {
         return IGraphTransformer::TStatus::Error;
     }
 
@@ -713,7 +717,7 @@ IGraphTransformer::TStatus BlockMergeFinalizeHashedWrapper(const TExprNode::TPtr
     return IGraphTransformer::TStatus::Ok;
 }
 
-IGraphTransformer::TStatus WideToBlocksWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TContext& ctx) {
+IGraphTransformer::TStatus WideToBlocksWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TExtContext& ctx) {
     Y_UNUSED(output);
     if (!EnsureArgsCount(*input, 1U, ctx.Expr)) {
         return IGraphTransformer::TStatus::Error;
@@ -732,6 +736,10 @@ IGraphTransformer::TStatus WideToBlocksWrapper(const TExprNode::TPtr& input, TEx
         }
 
         if (!EnsurePersistableType(input->Pos(), *type, ctx.Expr)) {
+            return IGraphTransformer::TStatus::Error;
+        }
+
+        if (!EnsureSupportedAsBlockType(input->Pos(), *type, ctx.Expr, ctx.Types)) {
             return IGraphTransformer::TStatus::Error;
         }
 

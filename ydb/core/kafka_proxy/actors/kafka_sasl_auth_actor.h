@@ -2,12 +2,18 @@
 
 #include "ydb/library/aclib/aclib.h"
 #include <ydb/core/base/ticket_parser.h>
+#include <ydb/core/tx/scheme_board/events.h>
+#include <ydb/core/tx/scheme_cache/scheme_cache.h>
+#include <ydb/public/api/grpc/ydb_auth_v1.grpc.pb.h>
+#include <ydb/core/tx/scheme_cache/scheme_cache.h>
 #include <ydb/public/api/grpc/ydb_auth_v1.grpc.pb.h>
 #include <library/cpp/actors/core/actor_bootstrapped.h>
 
 #include "actors.h"
 
 namespace NKafka {
+
+using namespace NKikimr;    
 
 class TKafkaSaslAuthActor: public NActors::TActorBootstrapped<TKafkaSaslAuthActor> {
 
@@ -48,21 +54,27 @@ public:
 
 private:
     STATEFN(StateWork) {
+        KAFKA_LOG_T("Received event: " << (*ev.Get()).GetTypeName());
         switch (ev->GetTypeRewrite()) {
             HFunc(NKikimr::TEvTicketParser::TEvAuthorizeTicketResult, Handle);
             HFunc(TEvPrivate::TEvTokenReady, Handle);
             HFunc(TEvPrivate::TEvAuthFailed, Handle);
+            HFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, Handle);
         }
     }
 
     void Handle(NKikimr::TEvTicketParser::TEvAuthorizeTicketResult::TPtr& ev, const NActors::TActorContext& ctx);
     void Handle(TEvPrivate::TEvTokenReady::TPtr& ev, const NActors::TActorContext& ctx);
     void Handle(TEvPrivate::TEvAuthFailed::TPtr& ev, const NActors::TActorContext& ctx);
+    void Handle(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev, const TActorContext& ctx);
 
     void StartPlainAuth(const NActors::TActorContext& ctx);
     void SendLoginRequest(TKafkaSaslAuthActor::TAuthData authData, const NActors::TActorContext& ctx);
-    void SendAuthFailedAndDie(EKafkaErrors errorCode, const TString& errorMessage, const TString& details, const NActors::TActorContext& ctx);
+    void SendDescribeRequest(const NActors::TActorContext& ctx);
     bool TryParseAuthDataTo(TKafkaSaslAuthActor::TAuthData& authData, const NActors::TActorContext& ctx);
+    void SendResponseAndDie(EKafkaErrors errorCode, const TString& errorMessage, const TString& details, const NActors::TActorContext& ctx);
+    
+    void ReplyIfReady(const NActors::TActorContext& ctx);
 
 private:
     const TContext::TPtr Context;
@@ -71,7 +83,17 @@ private:
     const TSaslAuthenticateRequestData* AuthenticateRequestData;
     const NKikimr::NRawSocket::TNetworkConfig::TSocketAddressType Address;
 
-    TString Database;
+    TString DatabasePath;
+    TIntrusiveConstPtr<NACLib::TUserToken> UserToken;
+    TString FolderId;
+    TString ServiceAccountId;
+    TString DatabaseId;
+    TString Coordinator;
+    TString ResourcePath;
+    TString CloudId;
+
+    bool Authentificated = false;
+    bool Described = false;
 };
 
 } // NKafka

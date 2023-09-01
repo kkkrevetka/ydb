@@ -7,6 +7,7 @@ SRCS(
     actors/kafka_produce_actor.cpp
     actors/kafka_sasl_auth_actor.cpp
     actors/kafka_sasl_handshake_actor.cpp
+    actors/kafka_metrics_actor.cpp
     kafka_connection.cpp
     kafka_connection.h
     kafka_listener.h
@@ -19,7 +20,10 @@ SRCS(
     kafka_messages_int.h
     kafka_proxy.h
     kafka_records.cpp
+    kafka_metrics.cpp
 )
+
+GENERATE_ENUM_SERIALIZATION(kafka.h)
 
 PEERDIR(
     library/cpp/actors/core

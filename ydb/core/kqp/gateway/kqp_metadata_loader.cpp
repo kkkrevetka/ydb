@@ -2,6 +2,8 @@
 #include "actors/kqp_ic_gateway_actors.h"
 
 #include <ydb/core/base/path.h>
+#include <ydb/core/statistics/events.h>
+#include <ydb/core/statistics/stat_service.h>
 
 #include <library/cpp/actors/core/hfunc.h>
 #include <library/cpp/actors/core/log.h>
@@ -269,6 +271,7 @@ TTableMetadataResult GetExternalDataSourceMetadataResult(const NSchemeCache::TSc
     tableMeta->ExternalSource.DataSourceLocation = description.GetLocation();
     tableMeta->ExternalSource.DataSourceInstallation = description.GetInstallation();
     tableMeta->ExternalSource.DataSourceAuth = description.GetAuth();
+    tableMeta->ExternalSource.Properties = description.GetProperties();
     tableMeta->ExternalSource.DataSourcePath = tableName;
     return result;
 }
@@ -416,13 +419,13 @@ void UpdateExternalDataSourceSecretsValue(TTableMetadataResult& externalDataSour
     }
 }
 
-NThreading::TFuture<TDescribeSecretsResponse> LoadExternalDataSourceSecretValues(const NSchemeCache::TSchemeCacheNavigate::TEntry& entry, const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, TActorSystem* actorSystem) {
+NThreading::TFuture<TDescribeSecretsResponse> LoadExternalDataSourceSecretValues(const NSchemeCache::TSchemeCacheNavigate::TEntry& entry, const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, TDuration maximalSecretsSnapshotWaitTime, TActorSystem* actorSystem) {
     const auto& authDescription = entry.ExternalDataSourceInfo->Description.GetAuth();
     switch (authDescription.identity_case()) {
         case NKikimrSchemeOp::TAuth::kServiceAccount: {
             const TString& saSecretId = authDescription.GetServiceAccount().GetSecretName();
             auto promise = NewPromise<TDescribeSecretsResponse>();
-            actorSystem->Register(new TDescribeSecretsActor(userToken ? userToken->GetUserSID() : "", {saSecretId}, promise));
+            actorSystem->Register(new TDescribeSecretsActor(userToken ? userToken->GetUserSID() : "", {saSecretId}, promise, maximalSecretsSnapshotWaitTime));
             return promise.GetFuture();
         }
 
@@ -432,7 +435,7 @@ NThreading::TFuture<TDescribeSecretsResponse> LoadExternalDataSourceSecretValues
         case NKikimrSchemeOp::TAuth::kBasic: {
             const TString& passwordSecretId = authDescription.GetBasic().GetPasswordSecretName();
             auto promise = NewPromise<TDescribeSecretsResponse>();
-            actorSystem->Register(new TDescribeSecretsActor(userToken ? userToken->GetUserSID() : "", {passwordSecretId}, promise));
+            actorSystem->Register(new TDescribeSecretsActor(userToken ? userToken->GetUserSID() : "", {passwordSecretId}, promise, maximalSecretsSnapshotWaitTime));
             return promise.GetFuture();
         }
 
@@ -440,7 +443,7 @@ NThreading::TFuture<TDescribeSecretsResponse> LoadExternalDataSourceSecretValues
             const TString& saSecretId = authDescription.GetMdbBasic().GetServiceAccountSecretName();
             const TString& passwordSecreId = authDescription.GetMdbBasic().GetPasswordSecretName();
             auto promise = NewPromise<TDescribeSecretsResponse>();
-            actorSystem->Register(new TDescribeSecretsActor(userToken ? userToken->GetUserSID() : "", {saSecretId, passwordSecreId}, promise));
+            actorSystem->Register(new TDescribeSecretsActor(userToken ? userToken->GetUserSID() : "", {saSecretId, passwordSecreId}, promise, maximalSecretsSnapshotWaitTime));
             return promise.GetFuture();
         }
 
@@ -448,7 +451,7 @@ NThreading::TFuture<TDescribeSecretsResponse> LoadExternalDataSourceSecretValues
             const TString& awsAccessKeyIdSecretId = authDescription.GetAws().GetAwsAccessKeyIdSecretName();
             const TString& awsAccessKeyKeySecretId = authDescription.GetAws().GetAwsSecretAccessKeySecretName();
             auto promise = NewPromise<TDescribeSecretsResponse>();
-            actorSystem->Register(new TDescribeSecretsActor(userToken ? userToken->GetUserSID() : "", {awsAccessKeyIdSecretId, awsAccessKeyKeySecretId}, promise));
+            actorSystem->Register(new TDescribeSecretsActor(userToken ? userToken->GetUserSID() : "", {awsAccessKeyIdSecretId, awsAccessKeyKeySecretId}, promise, maximalSecretsSnapshotWaitTime));
             return promise.GetFuture();            
         }
 
@@ -688,7 +691,7 @@ NThreading::TFuture<TTableMetadataResult> TKqpTableMetadataLoader::LoadTableMeta
 
     const auto schemeCacheId = MakeSchemeCacheID();
 
-    return SendActorRequest<TRequest, TResponse, TResult>(
+    auto future = SendActorRequest<TRequest, TResponse, TResult>(
         ActorSystem,
         schemeCacheId,
         ev.Release(),
@@ -728,7 +731,7 @@ NThreading::TFuture<TTableMetadataResult> TKqpTableMetadataLoader::LoadTableMeta
                             promise.SetValue(externalDataSourceMetadata);
                             return;
                         }
-                        LoadExternalDataSourceSecretValues(entry, userToken, ActorSystem)
+                        LoadExternalDataSourceSecretValues(entry, userToken, MaximalSecretsSnapshotWaitTime, ActorSystem)
                             .Subscribe([promise, externalDataSourceMetadata](const TFuture<TDescribeSecretsResponse>& result) mutable
                         {
                             UpdateExternalDataSourceSecretsValue(externalDataSourceMetadata, result.GetValue());
@@ -778,6 +781,57 @@ NThreading::TFuture<TTableMetadataResult> TKqpTableMetadataLoader::LoadTableMeta
                 promise.SetValue(ResultFromException<TResult>(e));
             }
         });
+
+    // Create an apply for the future that will fetch table statistics and save it in the metadata
+    // This method will only run if cost based optimization is enabled
+
+    if (!Config || !Config->HasOptEnableCostBasedOptimization()){
+        return future;
+    }
+
+    TActorSystem* actorSystem = ActorSystem;
+
+    return future.Apply([actorSystem,table](const TFuture<TTableMetadataResult>& f) {        
+        auto result = f.GetValue();
+        if (!result.Success()) {
+            return MakeFuture(result);
+        }
+
+        if (!result.Metadata->DoesExist){
+            return MakeFuture(result);
+        }
+
+        if (result.Metadata->Kind != NYql::EKikimrTableKind::Datashard &&
+            result.Metadata->Kind != NYql::EKikimrTableKind::Olap) {
+            return MakeFuture(result);
+        }
+
+        NKikimr::NStat::TRequest t;
+        t.StatType = NKikimr::NStat::EStatType::SIMPLE;
+        t.PathId = NKikimr::TPathId(result.Metadata->PathId.OwnerId(), result.Metadata->PathId.TableId());
+
+        auto event = MakeHolder<NStat::TEvStatistics::TEvGetStatistics>();
+        event->StatRequests.push_back(t);
+
+        auto statServiceId = NStat::MakeStatServiceID();
+
+        
+        return SendActorRequest<NStat::TEvStatistics::TEvGetStatistics, NStat::TEvStatistics::TEvGetStatisticsResult, TResult>(
+            actorSystem,
+            statServiceId,
+            event.Release(),
+            [result](TPromise<TResult> promise, NStat::TEvStatistics::TEvGetStatisticsResult&& response){
+                if (!response.StatResponses.size()){
+                    return;
+                }
+                auto resp = response.StatResponses[0];
+                auto s = std::get<NKikimr::NStat::TStatSimple>(resp.Statistics);
+                result.Metadata->RecordsCount = s.RowCount;
+                result.Metadata->DataSize = s.BytesSize;
+                promise.SetValue(result);
+        });
+
+    });
 }
 
 }  // namespace NKikimr::NKqp

@@ -707,6 +707,8 @@ TExprNode::TPtr SimplifyLogical(const TExprNode::TPtr& node, TExprContext& ctx) 
         YQL_CLOG(DEBUG, Core) << node->Content() <<  " over Nothing";
         return node->HeadPtr();
     }
+
+    Y_UNUSED(negations);
 /*TODO Move to peephole
     if (size == negations) {
         YQL_CLOG(DEBUG, Core) << node->Content() <<  " over negations";
@@ -981,8 +983,8 @@ TExprNode::TPtr OptimizeFlatContainerIf(const TExprNode::TPtr& node, TExprContex
     if (1U == nodeToCheck.ChildrenSize() && nodeToCheck.IsCallable(IsList ? "AsList" : "Just")) {
         YQL_CLOG(DEBUG, Core) << node->Content() << " with " << nodeToCheck.Content();
         auto res = ctx.NewCallable(node->Pos(), IsList ? "ListIf" : "OptionalIf", {node->HeadPtr(), nodeToCheck.HeadPtr()});
-        if (IsList) {
-            res = KeepSortedConstraint(res, node->GetConstraint<TSortedConstraintNode>(), ctx);
+        if constexpr (IsList) {
+            res = KeepConstraints(std::move(res), *node, ctx);
         }
         return res;
     }
@@ -2598,7 +2600,7 @@ TExprNode::TPtr OptimizeReorder(const TExprNode::TPtr& node, TExprContext& ctx) 
     }
 
     if constexpr (IsTop || IsSort) {
-        if (ETypeAnnotationKind::Struct == GetSeqItemType(*node->Head().GetTypeAnn()).GetKind()) {
+        if (/*TODO: enable later*/false && ETypeAnnotationKind::Struct == GetSeqItemType(*node->Head().GetTypeAnn()).GetKind()) {
             std::set<ui32> indexes;
             if (node->Tail().Tail().IsList())
                 for (auto i = 0U; i < node->Tail().Tail().ChildrenSize(); ++i)
@@ -6260,7 +6262,16 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
     map["ShuffleByKeys"] = map["PartitionsByKeys"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
         if (IsEmpty(node->Head(), *optCtx.Types)) {
             YQL_CLOG(DEBUG, Core) << node->Content() << " over empty input.";
-            return ctx.Builder(node->Pos()).Apply(node->Tail()).With(0, KeepConstraints(node->HeadPtr(), node->Tail().Head().Head(), ctx)).Seal().Build();
+            auto lambdaResult = ctx.Builder(node->Pos()).Apply(node->Tail()).With(0, KeepConstraints(node->HeadPtr(), node->Tail().Head().Head(), ctx)).Seal().Build();
+            if (node->IsCallable("ShuffleByKeys")) {
+                auto lambdaType = node->Tail().GetTypeAnn();
+                if (lambdaType->GetKind() == ETypeAnnotationKind::Optional) {
+                    lambdaResult = ctx.NewCallable(lambdaResult->Pos(), "ToList", { lambdaResult });
+                } else if (lambdaType->GetKind() == ETypeAnnotationKind::Stream) {
+                    lambdaResult = ctx.NewCallable(lambdaResult->Pos(), "ForwardList", { lambdaResult });
+                }
+            }
+            return lambdaResult;
         }
         return node;
     };

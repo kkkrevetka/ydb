@@ -15,11 +15,16 @@ namespace NKikimr::NKqp {
 class TKqpTableMetadataLoader : public NYql::IKikimrGateway::IKqpTableMetadataLoader {
 public:
 
-    explicit TKqpTableMetadataLoader(TActorSystem* actorSystem,
-        bool needCollectSchemeData = false, TKqpTempTablesState::TConstPtr tempTablesState = nullptr)
+    explicit TKqpTableMetadataLoader(TActorSystem* actorSystem, 
+        NYql::TKikimrConfiguration::TPtr config, 
+        bool needCollectSchemeData = false, 
+        TKqpTempTablesState::TConstPtr tempTablesState = nullptr,
+        TDuration maximalSecretsSnapshotWaitTime = TDuration::Seconds(20))
         : NeedCollectSchemeData(needCollectSchemeData)
         , ActorSystem(actorSystem)
+        , Config(config)
         , TempTablesState(std::move(tempTablesState))
+        , MaximalSecretsSnapshotWaitTime(maximalSecretsSnapshotWaitTime)
     {};
 
     NThreading::TFuture<NYql::IKikimrGateway::TTableMetadataResult> LoadTableMetadata(
@@ -56,7 +61,9 @@ private:
     TMutex Lock;
     bool NeedCollectSchemeData;
     TActorSystem* ActorSystem;
+    NYql::TKikimrConfiguration::TPtr Config;
     TKqpTempTablesState::TConstPtr TempTablesState;
+    TDuration MaximalSecretsSnapshotWaitTime;
 };
 
 } // namespace NKikimr::NKqp

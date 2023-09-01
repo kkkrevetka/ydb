@@ -1,5 +1,6 @@
 #include "type_ann_match_recognize.h"
 #include <ydb/library/yql/core/sql_types/match_recognize.h>
+#include <ydb/library/yql/core/yql_match_recognize.h>
 
 namespace NYql::NTypeAnnImpl {
 
@@ -54,26 +55,8 @@ MatchRecognizeParamsWrapper(const TExprNode::TPtr &input, TExprNode::TPtr &outpu
 
 namespace {
 
-
-const std::unordered_set<TString> GetPrimaryVars(const TExprNode::TPtr& pattern, TContext &ctx, size_t nestingLevel) {
-    std::unordered_set<TString> result;
-    for (const auto& term: pattern->Children()) {
-        for (const auto& factor: term->Children()) {
-            YQL_ENSURE(EnsureArgsCount(*factor, 5, ctx.Expr), "Expect 5 args");
-            if (factor->ChildRef(0)->IsAtom()) {
-                result.insert(TString(factor->ChildRef(0)->Content()));
-            } else {
-                YQL_ENSURE(nestingLevel < MaxMatchRecognizePatternNesting, "To big nesting level in the pattern");
-                auto subExprVars = GetPrimaryVars(factor->ChildRef(0), ctx, ++nestingLevel);
-                result.insert(subExprVars.begin(), subExprVars.end());
-            }
-        }
-    }
-    return result;
-}
-
 const TStructExprType* GetMatchedRowsRangesType(const TExprNode::TPtr& pattern, TContext &ctx) {
-    auto vars = GetPrimaryVars(pattern, ctx, 0);
+    auto vars = GetPatternVars(NYql::NMatchRecognize::ConvertPattern(pattern, ctx.Expr, 0));
     TVector<const TItemExprType*> items;
     for (const auto& var: vars) {
         const auto& item = ctx.Expr.MakeType<TStructExprType>(TVector<const TItemExprType*>{
@@ -107,9 +90,15 @@ MatchRecognizeMeasuresWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& out
         return IGraphTransformer::TStatus::Error;
     }
 
-    auto lambdaInputRowColumns = inputRowType->GetTypeAnn()->Cast<TTypeExprType>()->GetType()->Cast<TStructExprType>()->GetItems();
-    lambdaInputRowColumns.push_back(ctx.Expr.MakeType<TItemExprType>("_yql_Classifier", ctx.Expr.MakeType<TDataExprType>(EDataSlot::Utf8)));
-    lambdaInputRowColumns.push_back(ctx.Expr.MakeType<TItemExprType>("_yql_MatchNumber", ctx.Expr.MakeType<TDataExprType>(EDataSlot::Int64)));
+    auto lambdaInputRowColumns = inputRowType->GetTypeAnn()
+            ->Cast<TTypeExprType>()->GetType()->Cast<TStructExprType>()->GetItems();
+    using NYql::NMatchRecognize::MeasureInputDataSpecialColumns;
+    lambdaInputRowColumns.push_back(ctx.Expr.MakeType<TItemExprType>(
+            MeasureInputDataSpecialColumnName(MeasureInputDataSpecialColumns::Classifier),
+            ctx.Expr.MakeType<TDataExprType>(EDataSlot::Utf8)));
+    lambdaInputRowColumns.push_back(ctx.Expr.MakeType<TItemExprType>(
+            MeasureInputDataSpecialColumnName(MeasureInputDataSpecialColumns::MatchNumber),
+            ctx.Expr.MakeType<TDataExprType>(EDataSlot::Uint64)));
     auto lambdaInputRowType = ctx.Expr.MakeType<TStructExprType>(lambdaInputRowColumns);
     const auto& matchedRowsRanges = GetMatchedRowsRangesType(pattern, ctx);
     YQL_ENSURE(matchedRowsRanges);
@@ -201,23 +190,56 @@ MatchRecognizeDefinesWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& outp
 }
 
 IGraphTransformer::TStatus
-MatchRecognizeCoreWrapper(const TExprNode::TPtr &input, TExprNode::TPtr &output, TContext &ctx) {
+MatchRecognizeCoreWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TExtContext& ctx) {
     Y_UNUSED(output);
+    if (not ctx.Types.MatchRecognize) {
+        ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Pos()), "MATCH_RECOGNIZE is disabled"));
+        return IGraphTransformer::TStatus::Error;
+    }
     if (!EnsureArgsCount(*input, 4, ctx.Expr)) {
         return IGraphTransformer::TStatus::Error;
     }
     const auto& source = input->ChildRef(0);
-    const auto& partitionKeySelector = input->ChildRef(1);
+    auto& partitionKeySelector = input->ChildRef(1);
     const auto& partitionColumns = input->ChildRef(2);
     const auto& params = input->ChildRef(3);
+    if (not params->IsCallable("MatchRecognizeParams")) {
+        ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(params->Pos()), "Expected MatchRecognizeParams"));
+        return IGraphTransformer::TStatus::Error;
+    }
 
-    YQL_ENSURE(source->GetTypeAnn()->Cast<TFlowExprType>() != NULL, "Internal logic error. Flow expected");
+    if (!EnsureFlowType(*source, ctx.Expr)) {
+        return IGraphTransformer::TStatus::Error;
+    }
+    const auto& inputRowType = GetSeqItemType(source->GetTypeAnn());
     const auto& define = params->ChildRef(4);
-    YQL_ENSURE(GetSeqItemType(source->GetTypeAnn())->Equals(*define->ChildRef(0)->GetTypeAnn()->Cast<TTypeExprType>()->GetType()),
-                            "Internal logic error. Expected the same input type as for DEFINE");
+    if (not inputRowType->Equals(*define->ChildRef(0)->GetTypeAnn()->Cast<TTypeExprType>()->GetType())) {
+        ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Pos()), "Expected the same input row type as for DEFINE"));
+        return IGraphTransformer::TStatus::Error;
+    }
 
-    const auto& partitionKeySelectorType = partitionKeySelector->GetTypeAnn();
+    auto status = ConvertToLambda(partitionKeySelector, ctx.Expr, 1, 1);
+    if (status.Level != IGraphTransformer::TStatus::Ok) {
+        return status;
+    }
+    if (!UpdateLambdaAllArgumentsTypes(partitionKeySelector, { inputRowType }, ctx.Expr)) {
+        return IGraphTransformer::TStatus::Error;
+    }
+    auto partitionKeySelectorType = partitionKeySelector->GetTypeAnn();
+    if (!partitionKeySelectorType) {
+        return IGraphTransformer::TStatus::Repeat;
+    }
+    if (not EnsureTupleType(partitionKeySelector->Pos(), *partitionKeySelectorType, ctx.Expr)) {
+        return IGraphTransformer::TStatus::Error;
+    }
     const auto& partitionKeySelectorItemTypes = partitionKeySelectorType->Cast<TTupleExprType>()->GetItems();
+    if (not EnsureTupleOfAtoms(*partitionColumns, ctx.Expr)) {
+        return IGraphTransformer::TStatus::Error;
+    }
+    if (partitionColumns->ChildrenSize() != partitionKeySelectorItemTypes.size()) {
+        ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Pos()), "Partition columns does not match the size of partition lambda"));
+        return IGraphTransformer::TStatus::Error;
+    }
 
     auto outputTableColumns = params->GetTypeAnn()->Cast<TStructExprType>()->GetItems();
     for (size_t i = 0; i != partitionColumns->ChildrenSize(); ++i) {
@@ -228,6 +250,7 @@ MatchRecognizeCoreWrapper(const TExprNode::TPtr &input, TExprNode::TPtr &output,
     }
     const auto outputTableRowType = ctx.Expr.MakeType<TStructExprType>(outputTableColumns);
     input->SetTypeAnn(ctx.Expr.MakeType<TFlowExprType>(outputTableRowType));
+
     return IGraphTransformer::TStatus::Ok;
 }
 

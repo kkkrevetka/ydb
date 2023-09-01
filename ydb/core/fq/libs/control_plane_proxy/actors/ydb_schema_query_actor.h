@@ -16,9 +16,9 @@ NActors::IActor* MakeCreateConnectionActor(
     TEvControlPlaneProxy::TEvCreateConnectionRequest::TPtr request,
     TDuration requestTimeout,
     TCounters& counters,
+    TPermissions permissions,
     const NConfig::TCommonConfig& commonConfig,
-    TSigner::TPtr signer,
-    bool successOnAlreadyExists = false);
+    TSigner::TPtr signer);
 
 NActors::IActor* MakeModifyConnectionActor(
     const NActors::TActorId& proxyActorId,
@@ -36,21 +36,13 @@ NActors::IActor* MakeDeleteConnectionActor(
     const NConfig::TCommonConfig& commonConfig,
     TSigner::TPtr signer);
 
-NActors::IActor* MakeDropCreateConnectionActor(
-    const NActors::TActorId& proxyActorId,
-    TEvControlPlaneProxy::TEvCreateConnectionRequest::TPtr request,
-    TDuration requestTimeout,
-    TCounters& counters,
-    const NConfig::TCommonConfig& commonConfig,
-    TSigner::TPtr signer);
-
 /// Binding manipulation actors
 NActors::IActor* MakeCreateBindingActor(
     const NActors::TActorId& proxyActorId,
     TEvControlPlaneProxy::TEvCreateBindingRequest::TPtr request,
     TDuration requestTimeout,
     TCounters& counters,
-    bool successOnAlreadyExists = false);
+    TPermissions permissions);
 
 NActors::IActor* MakeModifyBindingActor(
     const NActors::TActorId& proxyActorId,

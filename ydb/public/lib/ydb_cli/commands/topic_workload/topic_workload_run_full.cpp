@@ -83,5 +83,7 @@ void TCommandWorkloadTopicRunFull::Parse(TConfig& config)
 
 int TCommandWorkloadTopicRunFull::Run(TConfig& config)
 {
+    Scenario.UseTransactions = false;
+
     return Scenario.Run(config);
 }

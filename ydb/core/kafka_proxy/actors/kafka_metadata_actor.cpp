@@ -6,6 +6,8 @@
 namespace NKafka {
 using namespace NKikimr::NGRpcProxy::V1;
 
+static constexpr int ProxyNodeId = 1;
+
 NActors::IActor* CreateKafkaMetadataActor(const TContext::TPtr context,
                                           const ui64 correlationId,
                                           const TMetadataRequestData* message) {
@@ -48,7 +50,7 @@ TActorId TKafkaMetadataActor::SendTopicRequest(const TMetadataRequestData::TMeta
     TGetPartitionsLocationRequest locationRequest{};
     locationRequest.Topic = topicRequest.Name.value();
     locationRequest.Token = Context->UserToken->GetSerializedToken();
-    locationRequest.Database = Context->Database;
+    locationRequest.Database = Context->DatabasePath;
 
     PendingResponses++;
 
@@ -59,29 +61,46 @@ void TKafkaMetadataActor::AddTopicError(
     TMetadataResponseData::TMetadataResponseTopic& topic, EKafkaErrors errorCode
 ) {
     topic.ErrorCode = errorCode;
+    ErrorCode = errorCode;
 }
 
 void TKafkaMetadataActor::AddTopicResponse(TMetadataResponseData::TMetadataResponseTopic& topic, TEvLocationResponse* response) {
+    bool withProxy = Context->Config.HasProxy() && !Context->Config.GetProxy().GetHostname().Empty();
+
     topic.ErrorCode = NONE_ERROR;
     topic.TopicId = TKafkaUuid(response->SchemeShardId, response->PathId);
+    if (withProxy) {
+        auto broker = TMetadataResponseData::TMetadataResponseBroker{};
+        broker.NodeId = ProxyNodeId;
+        broker.Host = Context->Config.GetProxy().GetHostname();
+        broker.Port = Context->Config.GetProxy().GetPort();
+        Response->Brokers.emplace_back(std::move(broker));
+    }
+
     topic.Partitions.reserve(response->Partitions.size());
     for (const auto& part : response->Partitions) {
+        auto nodeId = withProxy ? ProxyNodeId : part.NodeId;
+
         TMetadataResponseData::TMetadataResponseTopic::PartitionsMeta::ItemType responsePartition;
         responsePartition.PartitionIndex = part.PartitionId;
         responsePartition.ErrorCode = NONE_ERROR;
-        responsePartition.LeaderId = part.NodeId;
+        responsePartition.LeaderId = nodeId;
         responsePartition.LeaderEpoch = part.Generation;
-        responsePartition.ReplicaNodes.push_back(part.NodeId);
-        responsePartition.IsrNodes.push_back(part.NodeId);
-        auto ins = AllClusterNodes.insert(part.NodeId);
-        if (ins.second) {
-            auto broker = TMetadataResponseData::TMetadataResponseBroker{};
-            broker.NodeId = part.NodeId;
-            broker.Host = part.Hostname;
-            broker.Port = Context->Config.GetListeningPort();
-            Response->Brokers.emplace_back(std::move(broker));
-        }
+        responsePartition.ReplicaNodes.push_back(nodeId);
+        responsePartition.IsrNodes.push_back(nodeId);
+
         topic.Partitions.emplace_back(std::move(responsePartition));
+
+        if (!withProxy) {
+            auto ins = AllClusterNodes.insert(part.NodeId);
+            if (ins.second) {
+                auto broker = TMetadataResponseData::TMetadataResponseBroker{};
+                broker.NodeId = part.NodeId;
+                broker.Host = part.Hostname;
+                broker.Port = Context->Config.GetListeningPort();
+                Response->Brokers.emplace_back(std::move(broker));
+            }
+        }
     }
 }
 
@@ -134,7 +153,7 @@ void TKafkaMetadataActor::HandleResponse(TEvLocationResponse::TPtr ev, const TAc
 
 void TKafkaMetadataActor::RespondIfRequired(const TActorContext& ctx) {
     if (PendingResponses == 0) {
-        Send(Context->ConnectionId, new TEvKafka::TEvResponse(CorrelationId, Response));
+        Send(Context->ConnectionId, new TEvKafka::TEvResponse(CorrelationId, Response, ErrorCode));
         Die(ctx);
     }
 }

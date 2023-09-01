@@ -95,17 +95,18 @@ public:
     }
 
     TKqpWorkerActor(const TActorId& owner, const TString& sessionId, const TKqpSettings::TConstPtr& kqpSettings,
-        const TKqpWorkerSettings& workerSettings, NYql::IHTTPGateway::TPtr httpGateway,
+        const TKqpWorkerSettings& workerSettings, std::optional<TKqpFederatedQuerySetup> federatedQuerySetup,
         TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters,
-        NYql::ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory)
+        const NKikimrConfig::TMetadataProviderConfig& metadataProviderConfig
+        )
         : Owner(owner)
         , SessionId(sessionId)
         , Settings(workerSettings)
-        , HttpGateway(std::move(httpGateway))
+        , FederatedQuerySetup(federatedQuerySetup)
         , ModuleResolverState(moduleResolverState)
         , Counters(counters)
-        , CredentialsFactory(std::move(credentialsFactory))
         , Config(MakeIntrusive<TKikimrConfiguration>())
+        , MetadataProviderConfig(metadataProviderConfig)
         , CreationTime(TInstant::Now())
         , QueryId(0)
         , ShutdownState(std::nullopt)
@@ -119,7 +120,7 @@ public:
             Config->_KqpTablePathPrefix = Settings.Database;
         }
 
-        ApplyServiceConfig(*Config, Settings.Service);
+        ApplyServiceConfig(*Config, Settings.TableService);
 
         Config->FreezeDefaults();
 
@@ -133,14 +134,15 @@ public:
         LOG_D("Worker bootstrapped");
         Counters->ReportWorkerCreated(Settings.DbCounters);
 
-        std::shared_ptr<NYql::IKikimrGateway::IKqpTableMetadataLoader> loader = std::make_shared<TKqpTableMetadataLoader>(TlsActivationContext->ActorSystem(), false);
+        std::shared_ptr<NYql::IKikimrGateway::IKqpTableMetadataLoader> loader = std::make_shared<TKqpTableMetadataLoader>(
+            TlsActivationContext->ActorSystem(), Config, false, nullptr, 2 * TDuration::Seconds(MetadataProviderConfig.GetRefreshPeriodSeconds()));
         Gateway = CreateKikimrIcGateway(Settings.Cluster, Settings.Database, std::move(loader),
             ctx.ExecutorThread.ActorSystem, ctx.SelfID.NodeId(), RequestCounters);
 
         Config->FeatureFlags = AppData(ctx)->FeatureFlags;
 
         KqpHost = CreateKqpHost(Gateway, Settings.Cluster, Settings.Database, Config, ModuleResolverState->ModuleResolver,
-            HttpGateway, AppData(ctx)->FunctionRegistry, !Settings.LongSession, false, CredentialsFactory);
+            FederatedQuerySetup, AppData(ctx)->FunctionRegistry, !Settings.LongSession, false);
 
         Become(&TKqpWorkerActor::ReadyState);
     }
@@ -202,7 +204,7 @@ public:
             QueryState->QueryDeadlines.CancelAt = now + QueryState->RequestEv->GetCancelAfter();
         }
 
-        auto timeoutMs = GetQueryTimeout(QueryState->RequestEv->GetType(), QueryState->RequestEv->GetOperationTimeout().MilliSeconds(), Settings.Service);
+        auto timeoutMs = GetQueryTimeout(QueryState->RequestEv->GetType(), QueryState->RequestEv->GetOperationTimeout().MilliSeconds(), Settings.TableService, Settings.QueryService);
         QueryState->QueryDeadlines.TimeoutAt = now + timeoutMs;
 
         auto onError = [this, &ctx] (Ydb::StatusIds::StatusCode status, const TString& message) {
@@ -328,7 +330,7 @@ public:
         if (CleanupState->Final) {
             ReplyProcessError(ev->Sender, proxyRequestId, Ydb::StatusIds::BAD_SESSION, "Session is being closed");
         } else {
-            auto busyStatus = Settings.Service.GetUseSessionBusyStatus()
+            auto busyStatus = Settings.TableService.GetUseSessionBusyStatus()
                 ? Ydb::StatusIds::SESSION_BUSY
                 : Ydb::StatusIds::PRECONDITION_FAILED;
 
@@ -873,7 +875,7 @@ private:
             return;
         }
 
-        auto busyStatus = Settings.Service.GetUseSessionBusyStatus()
+        auto busyStatus = Settings.TableService.GetUseSessionBusyStatus()
             ? Ydb::StatusIds::SESSION_BUSY
             : Ydb::StatusIds::PRECONDITION_FAILED;
 
@@ -1013,7 +1015,7 @@ private:
     }
 
     static TKikimrQueryLimits GetQueryLimits(const TKqpWorkerSettings& settings) {
-        const auto& queryLimitsProto = settings.Service.GetQueryLimits();
+        const auto& queryLimitsProto = settings.TableService.GetQueryLimits();
         const auto& phaseLimitsProto = queryLimitsProto.GetPhaseLimits();
 
         TKikimrQueryLimits queryLimits;
@@ -1057,12 +1059,12 @@ private:
     TActorId Owner;
     TString SessionId;
     TKqpWorkerSettings Settings;
-    NYql::IHTTPGateway::TPtr HttpGateway;
+    std::optional<TKqpFederatedQuerySetup> FederatedQuerySetup;
     TIntrusivePtr<TModuleResolverState> ModuleResolverState;
     TIntrusivePtr<TKqpCounters> Counters;
-    NYql::ISecuredServiceAccountCredentialsFactory::TPtr CredentialsFactory;
     TIntrusivePtr<TKqpRequestCounters> RequestCounters;
     TKikimrConfiguration::TPtr Config;
+    NKikimrConfig::TMetadataProviderConfig MetadataProviderConfig;
     TInstant CreationTime;
     TIntrusivePtr<IKqpGateway> Gateway;
     TIntrusivePtr<IKqpHost> KqpHost;
@@ -1076,11 +1078,13 @@ private:
 
 IActor* CreateKqpWorkerActor(const TActorId& owner, const TString& sessionId,
     const TKqpSettings::TConstPtr& kqpSettings, const TKqpWorkerSettings& workerSettings,
-    NYql::IHTTPGateway::TPtr httpGateway,
+    std::optional<TKqpFederatedQuerySetup> federatedQuerySetup,
     TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters,
-    NYql::ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory)
+    const NKikimrConfig::TMetadataProviderConfig& metadataProviderConfig
+    )
 {
-    return new TKqpWorkerActor(owner, sessionId, kqpSettings, workerSettings, std::move(httpGateway), moduleResolverState, counters, std::move(credentialsFactory));
+    return new TKqpWorkerActor(owner, sessionId, kqpSettings, workerSettings, federatedQuerySetup,
+                               moduleResolverState, counters, metadataProviderConfig);
 }
 
 } // namespace NKqp

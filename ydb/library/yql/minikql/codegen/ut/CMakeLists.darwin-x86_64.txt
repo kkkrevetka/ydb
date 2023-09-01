@@ -109,6 +109,17 @@ add_custom_command(
   -o
   ${CMAKE_BINARY_DIR}/ydb/library/yql/minikql/codegen/ut/Funcs_merged.bc
 )
+add_custom_command(
+  OUTPUT
+  ${CMAKE_BINARY_DIR}/ydb/library/yql/minikql/codegen/ut/128_bit.ll.bc
+  DEPENDS
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/minikql/codegen/ut/128_bit.ll
+  COMMAND
+  ${LLVMAS}
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/minikql/codegen/ut/128_bit.ll
+  -o
+  ${CMAKE_BINARY_DIR}/ydb/library/yql/minikql/codegen/ut/128_bit.ll.bc
+)
 llvm_compile_cxx(ydb-library-yql-minikql-codegen-ut
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/minikql/codegen/ut/fib.cpp
   ${CMAKE_BINARY_DIR}/ydb/library/yql/minikql/codegen/ut/fib.cpp.bc
